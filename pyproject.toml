@@ -53,10 +53,10 @@ extend-immutable-calls = ["fastapi.Depends", "fastapi.Query"]
 [tool.mypy]
 python_version = "3.11"
 strict = true
-files = ["engine/scalpengine"]
+files = ["engine/scalpengine", "api/app"]
 ignore_missing_imports = true
 exclude = ["research", "web"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-testpaths = ["engine/tests", "research/tests"]
+testpaths = ["engine/tests", "api/tests", "research/tests"]

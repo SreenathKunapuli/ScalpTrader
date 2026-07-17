@@ -67,6 +67,7 @@ async def _day_scanner(engine: "Engine", stream: "MarketStream",
     INTRADAY_SLOT_RESERVE = 8         # always keep 8 slots open for intraday picks
 
     morning_done: set = set()         # dates where morning scan completed
+    ranker_done: set = set()          # dates where the 10:01 ranked scan ran
     last_intraday_ts = dt.datetime.min.replace(tzinfo=dt.timezone.utc)
     dynamic_added: list[str] = []     # FIFO queue of dynamically-added symbols
 
@@ -74,6 +75,38 @@ async def _day_scanner(engine: "Engine", stream: "MarketStream",
         await asyncio.sleep(30)
         now = dt.datetime.now(dt.timezone.utc)
         today = now.date()
+
+        # ── Phase 1.5: model-ranked morning scan (once per day, ~10:01 ET —
+        # the 09:30-09:45 window + the free tier's 15-min SIP embargo).
+        # Rescores the current universe with the trained scanner ranker and
+        # reorders stream priority; falls back silently to the momentum
+        # universe when no artifact is trained.
+        if today not in ranker_done and calendar.is_session_open(now):
+            import zoneinfo
+
+            et = now.astimezone(zoneinfo.ZoneInfo("America/New_York"))
+            if et.time() >= dt.time(10, 1):
+                ranker_done.add(today)
+                try:
+                    import time as _time
+
+                    from alpaca.data.historical import StockHistoricalDataClient
+
+                    from .scanner.live_scan import run_morning_scan
+
+                    hist = StockHistoricalDataClient(
+                        settings.alpaca_api_key, settings.alpaca_secret_key)
+                    result = await asyncio.to_thread(
+                        run_morning_scan,
+                        symbols=list(engine._live_universe),
+                        session_date=today, client=hist, repo=engine.repo,
+                        rate_limiter=lambda: _time.sleep(0.35))
+                    if result.plan_focus:
+                        log.info("day_scanner.ranked_scan",
+                                 top5=result.plan_focus[:5],
+                                 dropped=result.dropped_budget)
+                except Exception as exc:
+                    log.warning("day_scanner.ranked_scan_failed", error=str(exc))
 
         # ── Phase 1: morning scan ────────────────────────────────────────────
         if today not in morning_done:

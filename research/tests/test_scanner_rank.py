@@ -179,31 +179,90 @@ def test_dataset_drops_day_without_label(tmp_path):
     assert list(ds["symbol"]) == ["AAA"]
 
 
-def test_prev_day_fields_derive_from_prior_session(tmp_path):
-    """A recurring symbol's prev-day dollar-volume = its PRIOR runner row."""
+def test_prev_day_fields_derive_from_prior_calendar_session(tmp_path):
+    """prev_day_dollar_vol comes from the true prior CALENDAR session's
+    close * volume (data/daily_raw), NOT the prior runner-index row.
+
+    Previously the code shifted within the runner index (prior RUNNER day, which
+    can be months stale); this test pins the corrected behaviour: we inject a
+    synthetic daily_raw frame and assert the field equals close*volume of the
+    calendar-day row that immediately precedes each runner date.
+    """
     corpus = tmp_path / "1s"
     corpus.mkdir()
+    # Two runner sessions for the same symbol on 2024-06-03 and 2024-07-01.
     for date, base in [("2024-06-03", 3.0), ("2024-07-01", 3.5)]:
         _session_bars(date=date, base=base).to_parquet(
             corpus / f"AAA_{date}.parquet")
+
     viability = pd.DataFrame([
         {"symbol": "AAA", "date": "2024-06-03", "horizon_s": 60, "taker_clip_pnl": 10.0},
         {"symbol": "AAA", "date": "2024-07-01", "horizon_s": 60, "taker_clip_pnl": 20.0},
     ])
+
+    # runner_index rows — dollar_vol here is volume*vwap (the OLD source),
+    # deliberately set to a value that does NOT equal close*volume of the
+    # prior calendar session.  After the fix, this field must NOT be used.
     keys, rows = [], []
     for date, base, dv in [("2024-06-03", 3.0, 3e6), ("2024-07-01", 3.5, 7e6)]:
-        keys.append(("AAA", pd.Timestamp(f"{date} 00:00:00",
-                     tz="America/New_York").tz_convert("UTC")))
-        rows.append({"open": base * 1.1, "prev_close": base, "volume": dv / base,
-                     "dollar_vol": dv})
+        ts = pd.Timestamp(f"{date} 00:00:00", tz="America/New_York").tz_convert("UTC")
+        keys.append(("AAA", ts))
+        rows.append({"open": base * 1.1, "prev_close": base,
+                     "volume": dv / base, "dollar_vol": 999_999_999.0})
     index = pd.DataFrame(rows, index=pd.MultiIndex.from_tuples(
         keys, names=["symbol", "ts"]))
+
+    # Synthetic daily_raw: two calendar sessions — one prior to each runner date.
+    # Prior to 2024-06-03 runner: close=2.80, volume=500_000 -> dv=1.4e6
+    # Prior to 2024-07-01 runner: close=3.20, volume=800_000 -> dv=2.56e6
+    #   (This is a quiet non-runner day between the two runner sessions.)
+    daily_raw_rows = [
+        ("AAA", pd.Timestamp("2024-06-02 04:00:00", tz="UTC"), 2.80, 500_000.0),
+        ("AAA", pd.Timestamp("2024-06-28 04:00:00", tz="UTC"), 3.20, 800_000.0),
+    ]
+    daily_raw = pd.DataFrame(
+        [{"close": c, "volume": v} for _, _, c, v in daily_raw_rows],
+        index=pd.MultiIndex.from_tuples(
+            [(sym, ts) for sym, ts, _, _ in daily_raw_rows],
+            names=["symbol", "ts"],
+        ),
+    ).sort_index()
+
     files = [corpus / "AAA_2024-06-03.parquet", corpus / "AAA_2024-07-01.parquet"]
-    ds = build_scanner_dataset(viability, index, files, horizon_s=60)
+    ds = build_scanner_dataset(viability, index, files, horizon_s=60,
+                               daily_raw=daily_raw)
     ds = ds.set_index("date")
-    # first session has no prior -> NaN; second inherits the first's dollar_vol
-    assert np.isnan(ds.loc["2024-06-03", "prev_day_dollar_vol"])
-    assert ds.loc["2024-07-01", "prev_day_dollar_vol"] == pytest.approx(3e6)
+
+    # prev_day_dollar_vol IS stored in the feature dict and therefore in the
+    # dataset (it is one of the FEATURES columns).
+    # prev_day_volume is used internally (for relvol_at_open) but is NOT a model
+    # feature and is not stored in the dataset — check it via _daily_lookup directly.
+
+    # 2024-06-03: prior calendar session = 2024-06-02 => close*volume = 2.80*500_000
+    expected_dv_1 = 2.80 * 500_000
+    assert ds.loc["2024-06-03", "prev_day_dollar_vol"] == pytest.approx(expected_dv_1), (
+        f"expected close*volume={expected_dv_1} from 2024-06-02, "
+        f"got {ds.loc['2024-06-03', 'prev_day_dollar_vol']}"
+    )
+
+    # 2024-07-01: prior calendar session = 2024-06-28 => close*volume = 3.20*800_000
+    expected_dv_2 = 3.20 * 800_000
+    assert ds.loc["2024-07-01", "prev_day_dollar_vol"] == pytest.approx(expected_dv_2), (
+        f"expected close*volume={expected_dv_2} from 2024-06-28, "
+        f"got {ds.loc['2024-07-01', 'prev_day_dollar_vol']}"
+    )
+
+    # Verify prev_day_volume through _daily_lookup (not stored in dataset)
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    import importlib.util as ilu
+    spec = ilu.spec_from_file_location(
+        "_train_scanner_pvol",
+        Path(__file__).resolve().parents[1] / "scripts" / "train_scanner.py")
+    ts_mod = ilu.module_from_spec(spec)  # type: ignore[arg-type]
+    spec.loader.exec_module(ts_mod)  # type: ignore[union-attr]
+    lut = ts_mod._daily_lookup(index, daily_raw=daily_raw)
+    assert lut[("AAA", "2024-06-03")]["prev_day_volume"] == pytest.approx(500_000)
+    assert lut[("AAA", "2024-07-01")]["prev_day_volume"] == pytest.approx(800_000)
 
 
 # --------------------------------------------------------------------------- #

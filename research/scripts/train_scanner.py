@@ -44,6 +44,7 @@ ROOT = Path(__file__).resolve().parents[2]
 MANIFEST = ROOT / "data" / "corpus" / "manifest.csv"
 CORPUS_DIR = ROOT / "data" / "corpus" / "1s"
 INDEX_PATH = ROOT / "data" / "runner_index.parquet"
+DAILY_RAW_DIR = ROOT / "data" / "daily_raw"
 VIABILITY_PATH = ROOT / "data" / "viability" / "results.parquet"
 
 
@@ -56,41 +57,108 @@ def _git_head() -> str:
         return "unknown"
 
 
-def _daily_lookup(index: pd.DataFrame) -> dict[tuple[str, str], dict]:
+def _load_daily_raw(daily_raw_dir: Path = DAILY_RAW_DIR) -> pd.DataFrame:
+    """Concatenate all data/daily_raw/batch_*.parquet files into a single frame.
+
+    Returns a DataFrame indexed by (symbol, ts) with at least columns
+    close and volume — the same raw daily bars that were used to build
+    runner_index.parquet.  Loading once per training run is acceptable.
+    """
+    files = sorted(daily_raw_dir.glob("batch_*.parquet"))
+    if not files:
+        raise FileNotFoundError(
+            f"No batch_*.parquet found in {daily_raw_dir}; "
+            "cannot build true prior-calendar-session daily context")
+    frames = [pd.read_parquet(f, columns=["close", "volume"]) for f in files]
+    return pd.concat(frames).sort_index()
+
+
+def _daily_lookup(index: pd.DataFrame,
+                  daily_raw: pd.DataFrame | None = None,
+                  ) -> dict[tuple[str, str], dict]:
     """(symbol, date) -> settled-by-open daily fields for build_scanner_features.
 
-    Yesterday's dollar-volume/volume are attached ONLY when the same symbol has
-    an earlier runner-index session (its prior row); otherwise NaN (the model
-    handles missing values natively). Same-day dollar_vol/volume are hindsight
-    and are never forwarded as prev-day fields.
+    prev_day_dollar_vol and prev_day_volume are taken from the TRUE prior
+    CALENDAR session (close * volume), mirroring exactly what live_scan
+    build_daily_context computes from the Alpaca REST daily-bars response.
+
+    This eliminates the train/serve skew that existed when the prior runner-
+    index row (a stale high-volume day, median ~42 calendar days prior) was
+    used instead.  open and prev_close still come from runner_index because
+    they are set by select_runner_days from the actual runner-day bar and its
+    immediately preceding close, which IS a calendar-prior-session value.
+
+    Args:
+        index:      runner_index.parquet loaded as a DataFrame.
+        daily_raw:  Concatenated data/daily_raw batches (symbol, ts) index
+                    with close and volume columns.  Pass None to load lazily
+                    (the default for the training entry-point); pass a pre-
+                    loaded frame in tests to avoid I/O.
     """
+    if daily_raw is None:
+        daily_raw = _load_daily_raw()
+
     idx = index.sort_index()
     lut: dict[tuple[str, str], dict] = {}
+
+    # Build a per-symbol look-up from the raw daily frame once.
+    # For each runner (symbol, runner_date) we need the CALENDAR prior session,
+    # i.e. the latest raw-daily row whose date is strictly before runner_date.
+    raw_by_sym: dict[str, pd.DataFrame] = {}
+    for sym, sub in daily_raw.groupby(level="symbol", sort=False):
+        raw_by_sym[sym] = sub.droplevel("symbol").sort_index()
+
     for sym, sub in idx.groupby(level="symbol", sort=False):
-        prev_dv = sub["dollar_vol"].shift(1)
-        prev_vol = sub["volume"].shift(1)
-        for i, (_, ts) in enumerate(sub.index):
-            date_str = pd.Timestamp(ts).date().isoformat()
-            row = sub.iloc[i]
+        raw_sym = raw_by_sym.get(sym)
+        for _, (_, ts) in enumerate(sub.index):
+            runner_ts = pd.Timestamp(ts)
+            date_str = runner_ts.date().isoformat()
+            row = sub.loc[(sym, ts)]
+
+            if raw_sym is not None:
+                # Prior calendar session: latest raw daily bar strictly before
+                # the runner session timestamp (daily bars are midnight UTC /
+                # 4 am UTC so < runner_ts works for same-day exclusion).
+                prior_mask = raw_sym.index < runner_ts
+                if prior_mask.any():
+                    prior = raw_sym.loc[prior_mask].iloc[-1]
+                    prev_dv = float(prior["close"]) * float(prior["volume"])
+                    prev_vol = float(prior["volume"])
+                else:
+                    prev_dv = np.nan
+                    prev_vol = np.nan
+            else:
+                prev_dv = np.nan
+                prev_vol = np.nan
+
             lut[(sym, date_str)] = {
                 "open": float(row.get("open", np.nan)),
                 "prev_close": float(row.get("prev_close", np.nan)),
-                "prev_day_dollar_vol": float(prev_dv.iloc[i]),
-                "prev_day_volume": float(prev_vol.iloc[i]),
+                "prev_day_dollar_vol": prev_dv,
+                "prev_day_volume": prev_vol,
             }
     return lut
 
 
 def build_scanner_dataset(viability: pd.DataFrame, index: pd.DataFrame,
                           files: list[Path], horizon_s: int = LABEL_HORIZON_S,
+                          daily_raw: "pd.DataFrame | None" = None,
                           ) -> pd.DataFrame:
     """One row per stock-day: morning features + realized-scalpability label.
 
     Joins the three sources on (symbol, date). A day is dropped only when it has
     no first-15-min bars or no viability label at the horizon — never for a
     missing prev-day field (that stays NaN).
+
+    Args:
+        viability:  viability/results.parquet.
+        index:      runner_index.parquet.
+        files:      Corpus 1s parquet paths to process.
+        horizon_s:  Viability horizon whose taker_clip_pnl is the label.
+        daily_raw:  Pre-loaded daily_raw frame (symbol, ts) → close, volume.
+                    None means load from DAILY_RAW_DIR (normal training path).
     """
-    daily = _daily_lookup(index)
+    daily = _daily_lookup(index, daily_raw=daily_raw)
     lab = viability[viability["horizon_s"] == horizon_s]
     label_lut = {(r.symbol, r.date): float(r.taker_clip_pnl)
                  for r in lab.itertuples()}
@@ -143,9 +211,17 @@ def main() -> None:
     if args.limit:
         files = files[: args.limit]
 
+    print(f"loading daily_raw bars for true prior-session context "
+          f"from {DAILY_RAW_DIR} ...", flush=True)
+    daily_raw = _load_daily_raw()
+    print(f"  {len(daily_raw):,} daily_raw rows for "
+          f"{daily_raw.index.get_level_values('symbol').nunique():,} symbols",
+          flush=True)
+
     print(f"assembling scanner dataset from {len(files)} stock-days "
           f"(label = taker_clip_pnl @ {args.horizon}s) ...", flush=True)
-    ds = build_scanner_dataset(viability, index, files, args.horizon)
+    ds = build_scanner_dataset(viability, index, files, args.horizon,
+                               daily_raw=daily_raw)
     print(f"  {len(ds)} rows with a label", flush=True)
 
     cfg = TrainConfig()
@@ -165,8 +241,11 @@ def main() -> None:
     ic = rank_ic(pred_te, te["label"].to_numpy())
     dec = decile_table(pred_te, te["label"].to_numpy())
 
+    import joblib
+
     out = ROOT / args.out / time.strftime("%Y%m%d_%H%M%S")
     out.mkdir(parents=True, exist_ok=True)
+    joblib.dump(model, out / "model.joblib")
     (out / "config.json").write_text(json.dumps({
         "features": FEATURES,
         "label": f"taker_clip_pnl@{args.horizon}s (log1p, clip>=0)",

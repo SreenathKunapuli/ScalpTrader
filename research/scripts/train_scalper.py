@@ -44,12 +44,19 @@ def main() -> None:
     p.add_argument("--target-ps", type=float, default=0.05)
     p.add_argument("--stop-ps", type=float, default=0.04)
     p.add_argument("--timeout", type=int, default=120)
+    p.add_argument("--barrier-mode", choices=["fixed", "vol"], default="fixed")
+    p.add_argument("--vol-target-mult", type=float, default=1.0)
+    p.add_argument("--vol-stop-mult", type=float, default=0.5)
+    p.add_argument("--vol-window", type=int, default=300)
     p.add_argument("--limit", type=int, default=0, help="cap #stock-days")
     p.add_argument("--out", default="runs/scalper")
     args = p.parse_args()
 
     cfg = TrainConfig(target_ps=args.target_ps, stop_ps=args.stop_ps,
-                      timeout_s=args.timeout)
+                      timeout_s=args.timeout, barrier_mode=args.barrier_mode,
+                      vol_target_mult=args.vol_target_mult,
+                      vol_stop_mult=args.vol_stop_mult,
+                      vol_window_s=args.vol_window)
     man = pd.read_csv(MANIFEST)
     ok = man[man["status"] == "ok"]
     files = [CORPUS_DIR / f"{r.symbol}_{r.date}.parquet"

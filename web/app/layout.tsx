@@ -12,6 +12,7 @@ const nav = [
   { href: "/positions", label: "Positions" },
   { href: "/trades", label: "Trades" },
   { href: "/signals", label: "Signals" },
+  { href: "/scanner", label: "Scanner" },
   { href: "/settings", label: "Settings" },
 ];
 

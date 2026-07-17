@@ -41,6 +41,8 @@ class BarrierConfig:
 def label_scalps(
     bars: pd.DataFrame,
     cfg: BarrierConfig,
+    target_ps_arr: np.ndarray | None = None,
+    stop_ps_arr: np.ndarray | None = None,
 ) -> pd.DataFrame:
     """Assign triple-barrier labels to every second in *bars*.
 
@@ -65,6 +67,13 @@ def label_scalps(
     ask = bars["ask"].to_numpy(dtype=float)
     bid = bars["bid"].to_numpy(dtype=float)
     n_trades = bars["n_trades"].to_numpy(dtype=float)
+    # per-row barriers (volatility-scaled callers) or broadcast scalars
+    tgt = (np.asarray(target_ps_arr, dtype=float) if target_ps_arr is not None
+           else np.full(n, cfg.target_ps))
+    stp = (np.asarray(stop_ps_arr, dtype=float) if stop_ps_arr is not None
+           else np.full(n, cfg.stop_ps))
+    if len(tgt) != n or len(stp) != n:
+        raise ValueError("barrier arrays must match bars length")
 
     label = np.full(n, np.nan)
     entry_px = np.full(n, np.nan)
@@ -92,10 +101,12 @@ def label_scalps(
         if t + cfg.timeout_s >= n:
             continue  # truncated window at end of day -> INVALID, not a fake TIMEOUT
 
+        if np.isnan(tgt[t]) or np.isnan(stp[t]):
+            continue  # no barrier defined (e.g. vol warmup) -> INVALID
         entry = ask[t]
         sell_cost = cfg.fees.sell_cost_per_share(entry, cfg.clip_shares)
-        win_threshold = entry + cfg.target_ps + sell_cost
-        loss_threshold = entry - cfg.stop_ps
+        win_threshold = entry + tgt[t] + sell_cost
+        loss_threshold = entry - stp[t]
 
         # Mark as TIMEOUT by default (we know entry is valid)
         label[t] = 0.0

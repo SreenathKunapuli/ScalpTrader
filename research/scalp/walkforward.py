@@ -32,6 +32,15 @@ class TrainConfig:
     target_ps: float = 0.05
     stop_ps: float = 0.04
     timeout_s: int = 120
+    # barrier_mode "vol": per-row barriers = mult x causal rolling price range
+    # (fixed cents across a $0.7-$9 universe is the wrong geometry — the first
+    # OOS run proved it: monotone-improving rank, negative expectancy).
+    barrier_mode: str = "fixed"          # "fixed" | "vol"
+    vol_window_s: int = 300
+    vol_target_mult: float = 1.0
+    vol_stop_mult: float = 0.5
+    min_target_ps: float = 0.02
+    min_stop_ps: float = 0.015
     prob_threshold_grid: tuple[float, ...] = (0.4, 0.5, 0.6, 0.7)
     embargo_days: int = 1
     test_frac: float = 0.25
@@ -51,6 +60,23 @@ def _day_key(path: Path) -> tuple[str, str]:
     return sym, date
 
 
+def barrier_arrays(bars: pd.DataFrame, cfg: TrainConfig,
+                   ) -> tuple[np.ndarray, np.ndarray]:
+    """Per-row (target, stop) barriers. Vol mode is CAUSAL: row t uses the
+    rolling max-min price range over the trailing vol_window_s only; warmup
+    rows are NaN and the labeler marks them INVALID."""
+    n = len(bars)
+    if cfg.barrier_mode == "fixed":
+        return np.full(n, cfg.target_ps), np.full(n, cfg.stop_ps)
+    px = bars["close"].ffill()
+    w = cfg.vol_window_s
+    rng_ = px.rolling(w, min_periods=max(2, w // 3)).max() \
+        - px.rolling(w, min_periods=max(2, w // 3)).min()
+    tgt = (cfg.vol_target_mult * rng_).clip(lower=cfg.min_target_ps)
+    stp = (cfg.vol_stop_mult * rng_).clip(lower=cfg.min_stop_ps)
+    return tgt.to_numpy(), stp.to_numpy()
+
+
 def build_dataset(day_files: list[Path], cfg: TrainConfig,
                   ) -> tuple[pd.DataFrame, pd.Series, pd.DataFrame]:
     """Features/labels/meta across stock-days, per-day capped and stratified."""
@@ -60,15 +86,19 @@ def build_dataset(day_files: list[Path], cfg: TrainConfig,
         sym, date = _day_key(path)
         bars = pd.read_parquet(path)
         feats = build_features(bars)
-        lab = label_scalps(bars, cfg.barrier())
+        tgt, stp = barrier_arrays(bars, cfg)
+        lab = label_scalps(bars, cfg.barrier(), target_ps_arr=tgt,
+                           stop_ps_arr=stp)
         valid = lab["label"].notna()
         if not valid.any():
             continue
         f, y = feats[valid], lab.loc[valid, "label"]
+        vmask = valid.to_numpy()
         meta = pd.DataFrame({
             "symbol": sym, "date": date,
             "timeout_edge": lab.loc[valid, "timeout_edge"],
             "exit_s": lab.loc[valid, "exit_s"],
+            "target_ps": tgt[vmask], "stop_ps": stp[vmask],
         }, index=f.index)
         if len(f) > cfg.max_rows_per_day:
             # stratified subsample: keep label proportions, seeded
@@ -135,8 +165,9 @@ def evaluate(model, x_test: pd.DataFrame, y_test: pd.Series,
         p_win = model.predict_proba(x_test)[:, classes.index(1.0)]
     else:  # training data had no WIN labels — model can never signal an entry
         p_win = np.zeros(len(x_test))
-    edge = np.where(y_test.to_numpy() == 1.0, cfg.target_ps,
-                    np.where(y_test.to_numpy() == -1.0, -cfg.stop_ps,
+    edge = np.where(y_test.to_numpy() == 1.0, meta_test["target_ps"].to_numpy(),
+                    np.where(y_test.to_numpy() == -1.0,
+                             -meta_test["stop_ps"].to_numpy(),
                              meta_test["timeout_edge"].fillna(0.0).to_numpy()))
     base = meta_test.assign(p_win=p_win, edge=edge, label=y_test.to_numpy())
     n_days = meta_test["date"].nunique()

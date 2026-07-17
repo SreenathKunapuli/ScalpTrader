@@ -76,6 +76,7 @@ def test_evaluate_exact_expectancy_math():
         "symbol": "AAA", "date": "2024-06-03",
         "timeout_edge": [np.nan, np.nan, 0.01, np.nan],
         "exit_s": [10.0, 10.0, 20.0, 10.0],
+        "target_ps": 0.05, "stop_ps": 0.04,
     }, index=idx)
     model = _StubModel(np.array([0.9, 0.9, 0.9, 0.3]))
     cfg = TrainConfig(target_ps=0.05, stop_ps=0.04, prob_threshold_grid=(0.5,))
@@ -98,6 +99,29 @@ def test_non_overlap_enforced_within_symbol_day():
     kept = _non_overlapping(sel)
     # entries at t=0 (busy to 3s), t=3 (busy to 6s): only 2 of 5 survive
     assert len(kept) == 2
+
+
+def test_vol_barriers_causal_and_floored(tmp_path):
+    from scalp.walkforward import barrier_arrays
+    f = tmp_path / "AAA_2024-06-03.parquet"
+    _synth_day(f, seed=3)
+    bars = pd.read_parquet(f)
+    cfg = TrainConfig(barrier_mode="vol", vol_window_s=60,
+                      vol_target_mult=1.0, vol_stop_mult=0.5)
+    tgt, stp = barrier_arrays(bars, cfg)
+    assert np.isnan(tgt[0])                       # warmup rows undefined
+    assert np.nanmin(tgt) >= cfg.min_target_ps    # floored
+    assert np.nanmin(stp) >= cfg.min_stop_ps
+    # causality: rewriting the future must not change barrier at t0
+    t0 = 400
+    pert = bars.copy()
+    pert.iloc[t0 + 1:, pert.columns.get_loc("close")] *= 9.0
+    tgt2, _ = barrier_arrays(pert, cfg)
+    np.testing.assert_allclose(tgt[: t0 + 1], tgt2[: t0 + 1])
+    # stop scales with target (half by config) where defined
+    ratio = stp[~np.isnan(stp) & (tgt > cfg.min_target_ps)] \
+        / tgt[~np.isnan(stp) & (tgt > cfg.min_target_ps)]
+    assert (ratio <= 0.5 + 1e-9).all()
 
 
 def test_end_to_end_smoke(tmp_path):

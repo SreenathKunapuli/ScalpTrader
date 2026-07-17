@@ -14,17 +14,19 @@ from __future__ import annotations
 
 import asyncio
 from collections import defaultdict, deque
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
 import numpy as np
 import structlog
 
+from .config.scalp_tiers import ScalpConfig
 from .config.settings import Settings
 from .config.tiers import TIERS, Tier, TierConfig
 from .data import calendar
 from .data.bar_builder import Bar, BarBuilder, aggregate
-from .execution.order_manager import OrderManager
+from .execution.brackets import BracketAction, BracketBook
+from .execution.order_manager import OrderManager, is_target_coid
 from .persistence.repo import Repo
 from .pubsub import PubSub
 from .risk.kill_switch import KillSwitch
@@ -54,7 +56,8 @@ def atr_from_bars(bars: list[Bar], period: int = ATR_PERIOD) -> float:
 class Engine:
     def __init__(self, settings: Settings, tier: TierConfig, repo: Repo,
                  order_manager: OrderManager, ensemble: Ensemble,
-                 state: PortfolioState, pubsub: PubSub) -> None:
+                 state: PortfolioState, pubsub: PubSub,
+                 scalp_cfg: ScalpConfig | None = None) -> None:
         self.settings = settings
         self.tier = tier
         self.repo = repo
@@ -62,7 +65,8 @@ class Engine:
         self.ensemble = ensemble
         self.state = state
         self.pubsub = pubsub
-        self.risk = RiskManager(tier, state)
+        self.scalp_cfg = scalp_cfg
+        self.risk = RiskManager(tier, state, scalp_cfg=scalp_cfg)
         self.kill = KillSwitch(state, tier, repo, order_manager, pubsub_emit(pubsub),
                                staleness_kill_s=settings.staleness_kill_s,
                                broker_error_count=settings.broker_error_kill_count,
@@ -86,6 +90,11 @@ class Engine:
         self._live_universe: list[str] = list(tier.universe)
         # stop prices staged at order-submit time, applied on fill (avoids async race)
         self._pending_stops: dict[str, float] = {}
+        # scalp brackets: stop/timeout legs tracked in-process (target rests at broker)
+        self.brackets = BracketBook()
+        # bracket params staged at entry-submit time, armed on FILL (no bracket
+        # before shares exist): symbol -> (qty, target_px, stop_px, deadline)
+        self._pending_brackets: dict[str, tuple[int, float, float, datetime]] = {}
 
     # ---------------- data path ---------------- #
     def warmup(self, history: dict[str, list[Bar]]) -> None:
@@ -129,6 +138,13 @@ class Engine:
         denom = bid_sz + ask_sz
         if denom > 0:
             self._qimb_acc[symbol].append((bid_sz - ask_sz) / denom)
+        # scalp fast path: per-tick stop/timeout check. Only this symbol's
+        # just-received quote is passed — never a stale mark — and an invalid
+        # quote (zero/crossed) must not fire a stop.
+        if symbol in self.brackets.armed and bid > 0 and ask >= bid:
+            now = datetime.now(UTC)
+            for action in self.brackets.check(now, {symbol: (bid, ask)}):
+                await self._fire_bracket_exit(action, bid, ask, now)
 
     async def on_stream_bar(self, symbol: str, ts: datetime, o: float, h: float,
                             low: float, c: float, vol: int, vwap: float,
@@ -276,6 +292,13 @@ class Engine:
             if p:
                 p.stop_price = stop
             self._pending_stops[symbol] = stop
+            if self.scalp_cfg is not None and side == "buy" and target_qty > 0:
+                # Stage the bracket now; it is armed on FILL (cli fill handler)
+                # so no bracket exists before shares do.
+                sc = self.scalp_cfg
+                self._pending_brackets[symbol] = (
+                    abs(delta), price + sc.target_ps, price - sc.stop_ps,
+                    now + timedelta(seconds=sc.timeout_s))
             await self.pubsub.publish("orders", {
                 "symbol": symbol, "side": side, "qty": abs(delta),
                 "ts": now.isoformat(), "reason": "signal"})
@@ -289,6 +312,12 @@ class Engine:
         close_qty = pos.qty - target_qty
         if close_qty == 0:
             return
+        # A signal/eod/kill exit supersedes an armed bracket: disarm it and
+        # cancel the resting take-profit leg, or that -tgt limit would sell
+        # shares this exit is about to sell (double-sell -> short).
+        if symbol in self.brackets.armed:
+            self.brackets.disarm(symbol)
+            await self._cancel_resting_target(symbol)
         side: Literal["buy", "sell"] = "sell" if close_qty > 0 else "buy"
         intent = OrderIntent(symbol=symbol, side=side, qty=abs(close_qty),
                              price_hint=pos.mark, reason=reason)
@@ -302,6 +331,44 @@ class Engine:
         except Exception as exc:
             log.error("exit.submit_failed", symbol=symbol, error=str(exc))
 
+    async def _fire_bracket_exit(self, action: BracketAction, bid: float,
+                                 ask: float, now: datetime) -> None:
+        """Fire a bracket stop/timeout exit: cancel the resting take-profit
+        (-tgt) leg, then submit an urgent sell. BracketBook.check already
+        disarmed the bracket, so this fires at most once per arm."""
+        log.info("bracket.fired", symbol=action.symbol, kind=action.kind,
+                 qty=action.qty, bid=bid)
+        intent = OrderIntent(symbol=action.symbol, side="sell", qty=action.qty,
+                             price_hint=bid, reason=action.kind)
+        approval = self.risk.approve_exit(intent)
+        if isinstance(approval, Rejection):
+            self.repo.add_rejection(approval.reason, intent.as_dict())
+            log.info("bracket.exit_rejected", symbol=action.symbol,
+                     reason=approval.reason)
+            return
+        # cancel the resting target first so both legs can't fill
+        await self._cancel_resting_target(action.symbol)
+        try:
+            await self.om.submit(approval, now, mid=(bid + ask) / 2,
+                                 spread=ask - bid)
+        except Exception as exc:
+            log.error("bracket.exit_submit_failed", symbol=action.symbol,
+                      error=str(exc))
+
+    async def _cancel_resting_target(self, symbol: str) -> None:
+        """Best-effort cancel of a symbol's resting take-profit (-tgt) limit.
+        Failure is logged, never raised: an unfilled sell limit above market
+        is far less dangerous than skipping the exit that follows."""
+        try:
+            for o in await self.om._broker.get_open_orders():
+                if o.symbol == symbol and is_target_coid(o.client_order_id):
+                    await self.om._broker.cancel_order(o.id)
+                    log.info("bracket.target_cancelled", symbol=symbol,
+                             coid=o.client_order_id)
+        except Exception as exc:
+            log.error("bracket.target_cancel_failed", symbol=symbol,
+                      error=str(exc))
+
     async def _flatten_intraday(self, reason: str) -> None:
         """Graceful exit (urgent limit -> market) of every intraday-book
         position. Kill switch's intraday path."""
@@ -309,6 +376,8 @@ class Engine:
             await self._exit_position(sym, "kill")
 
     async def check_stops(self, bar: Bar) -> None:
+        if bar.symbol in self.brackets.armed:
+            return  # an armed bracket owns the exit (fast path); no double-fire
         pos = self.state.positions.get(bar.symbol)
         if not pos or pos.stop_price is None:
             return
@@ -353,10 +422,6 @@ class Engine:
             log.info("eod.flatten", n=len(open_positions))
             for sym, _pos in open_positions:
                 await self._exit_position(sym, "eod")
-                if self._is_xsec(sym) and self.xsec is not None:
-                    self.xsec.holdings.pop(sym, None)
-            if self.xsec is not None:
-                self.xsec._save_book()
 
     async def heartbeat(self) -> None:
         last_beat = datetime.now(UTC)
@@ -420,10 +485,7 @@ class Engine:
                     if tier_name in [t.value for t in Tier] and not self.state.halted:
                         self.tier = TIERS[Tier(tier_name)]
                         self.risk.tier = self.tier
-                        self.risk.xsec_cfg = XSEC_BY_TIER[self.tier.name]
                         self.kill.tier = self.tier
-                        if self.xsec is not None:  # profile follows the tier
-                            self.xsec.cfg = self.risk.xsec_cfg
                         self.repo.update_state(tier=tier_name)
                 self.repo.mark_command_done(cmd.id)
 
@@ -448,9 +510,7 @@ class Engine:
         hardcoded tier universe — held positions are never touched (we need
         to keep monitoring them for exits).
         """
-        protected = (set(self.tier.universe)
-                     | set(self.state.positions)
-                     | (set(self.xsec.holdings) if self.xsec else set()))
+        protected = set(self.tier.universe) | set(self.state.positions)
         actual_evict = [s for s in evict if s not in protected]
         if actual_evict:
             self._live_universe = [s for s in self._live_universe
@@ -473,20 +533,26 @@ class Engine:
             now = datetime.now(UTC)
             if calendar.is_session_open(now) and last_day != now.date():
                 last_day = now.date()
-                self.state.day_start_equity = self.state.equity
-                self.state.intraday_realized_today = 0.0
-                if self.state.intraday_halted:  # day-scoped halt: new-day amnesty
-                    self.state.intraday_halted = False
-                    self.repo.update_state(status="RUNNING", halted_reason="")
-                    log.info("intraday_halt.cleared")
-                self.repo.update_state(day_start_equity=self.state.equity)
-                # reset dynamic universe — yesterday's movers don't carry over
-                self._live_universe = list(self.tier.universe)
-                self.risk.reset_dynamic_universe()
-                # shadow evaluation: refresh per-signal health multipliers
-                self.ensemble.health_multipliers = self.health.evaluate(now)
-                log.info("day.roll", equity=self.state.equity,
-                         health=self.ensemble.health_multipliers)
+                self._roll_day(now)
+
+    def _roll_day(self, now: datetime) -> None:
+        """Once-per-session-day resets (extracted from day_roll's loop for
+        testability)."""
+        self.state.day_start_equity = self.state.equity
+        self.state.intraday_realized_today = 0.0
+        self.state.symbol_realized_today.clear()  # per-symbol scalp loss caps
+        if self.state.intraday_halted:  # day-scoped halt: new-day amnesty
+            self.state.intraday_halted = False
+            self.repo.update_state(status="RUNNING", halted_reason="")
+            log.info("intraday_halt.cleared")
+        self.repo.update_state(day_start_equity=self.state.equity)
+        # reset dynamic universe — yesterday's movers don't carry over
+        self._live_universe = list(self.tier.universe)
+        self.risk.reset_dynamic_universe()
+        # shadow evaluation: refresh per-signal health multipliers
+        self.ensemble.health_multipliers = self.health.evaluate(now)
+        log.info("day.roll", equity=self.state.equity,
+                 health=self.ensemble.health_multipliers)
 
 
 def pubsub_emit(ps: PubSub) -> Any:

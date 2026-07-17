@@ -178,6 +178,82 @@ async def _day_scanner(engine: "Engine", stream: "MarketStream",
                  universe=len(engine._live_universe))
 
 
+def make_fill_handler(engine: "Engine", om: "OrderManager"):  # type: ignore[no-untyped-def]
+    """Build the trade-updates fill callback (module-level so tests can wire
+    it against a MockBroker-backed engine).
+
+    Routing: target (-tgt) fills disarm the bracket and stop; ordinary fills
+    apply the staged ATR stop, and a BUY fill with a staged bracket arms it
+    and rests the take-profit leg at the broker (armed on FILL, not submit —
+    no bracket before shares exist)."""
+    from .execution.order_manager import is_target_coid
+
+    async def _on_fill_event(symbol: str, side: str, qty: int, price: float,
+                             coid: str) -> None:
+        if is_target_coid(coid):
+            om.on_fill(symbol, side, qty, price, reason="target", book="intraday")
+            engine.brackets.on_target_fill(symbol)
+            engine._pending_brackets.pop(symbol, None)
+            return
+        om.on_fill(symbol, side, qty, price, reason="stream", book="intraday")
+        # Apply ATR stop staged at submit time.
+        stop = engine._pending_stops.pop(symbol, None)
+        if stop is not None:
+            pos = engine.state.positions.get(symbol)
+            if pos and pos.book == "intraday":
+                pos.stop_price = stop
+        pending = engine._pending_brackets.get(symbol)
+        if pending is not None and side == "buy":
+            engine._pending_brackets.pop(symbol)
+            b_qty, target_px, stop_px, deadline = pending
+            engine.brackets.arm(symbol, b_qty, entry_px=price, target_px=target_px,
+                                stop_px=stop_px, deadline=deadline)
+            asyncio.create_task(
+                om.submit_bracket_target(symbol, b_qty, target_px, entry_coid=coid))
+            log.info("bracket.armed", symbol=symbol, qty=b_qty,
+                     target=target_px, stop=stop_px)
+
+    return _on_fill_event
+
+
+def resolve_scalp_profile(profile: str) -> "ScalpConfig | None":
+    """Map settings.scalp_profile to its frozen ScalpConfig.
+
+    "off" -> None: the engine runs with every scalp/bracket path dormant
+    (legacy behavior). Anything else unrecognized is a config error on the
+    money path — fail loudly rather than silently trading without brackets."""
+    from .config.scalp_tiers import SCALP_LARGE, SCALP_SMALL
+
+    if profile == "off":
+        return None
+    if profile == "small":
+        return SCALP_SMALL
+    if profile == "large":
+        return SCALP_LARGE
+    raise ValueError(f"unknown scalp_profile {profile!r} (expected off|small|large)")
+
+
+def rearm_open_scalps(engine: "Engine", scalp_cfg: "ScalpConfig") -> None:
+    """Re-arm brackets for open intraday longs found at startup reconcile.
+
+    Conservative restart behavior: the original arm-time target/stop/deadline
+    are not persisted (BracketBook is a derived in-memory view), so each
+    position gets ScalpConfig-derived legs off its entry price and a fresh
+    deadline of now + timeout_s — bounding the extra holding time of any
+    scalp that outlived its original bracket to one timeout window."""
+    from datetime import UTC, datetime, timedelta
+
+    now = datetime.now(UTC)
+    for sym, pos in engine.state.positions.items():
+        if pos.book != "intraday" or pos.qty <= 0:
+            continue  # brackets exit long scalps only
+        engine.brackets.arm(sym, pos.qty, entry_px=pos.entry_price,
+                            target_px=pos.entry_price + scalp_cfg.target_ps,
+                            stop_px=pos.entry_price - scalp_cfg.stop_ps,
+                            deadline=now + timedelta(seconds=scalp_cfg.timeout_s))
+        log.info("bracket.rearmed_on_restart", symbol=sym, qty=pos.qty)
+
+
 async def _run(tier_name: str) -> None:
     import atexit
     import os
@@ -232,9 +308,12 @@ async def _run(tier_name: str) -> None:
     broker = AlpacaBroker(s.alpaca_api_key, s.alpaca_secret_key, s.alpaca_paper_base_url)
     om = OrderManager(broker, repo, state)
     ensemble = Ensemble([MomentumSignal(), MeanReversionSignal()])
-    engine = Engine(s, tier, repo, om, ensemble, state, pubsub)
+    scalp_cfg = resolve_scalp_profile(s.scalp_profile)
+    engine = Engine(s, tier, repo, om, ensemble, state, pubsub, scalp_cfg=scalp_cfg)
 
     await reconcile(broker, repo, state)
+    if scalp_cfg is not None:
+        rearm_open_scalps(engine, scalp_cfg)
     state.day_start_equity = state.equity
     state.peak_equity = max(state.peak_equity, state.equity)
     repo.update_state(status="RUNNING", tier=tier_name,
@@ -248,18 +327,8 @@ async def _run(tier_name: str) -> None:
     stream = MarketStream(s.alpaca_api_key, s.alpaca_secret_key, tier.universe,
                           engine.on_trade, engine.on_quote, engine.on_stream_bar)
 
-    async def _on_fill_event(symbol: str, side: str, qty: int, price: float,
-                             coid: str) -> None:
-        om.on_fill(symbol, side, qty, price, reason="stream", book="intraday")
-        # Apply ATR stop staged at submit time.
-        stop = engine._pending_stops.pop(symbol, None)
-        if stop is not None:
-            pos = engine.state.positions.get(symbol)
-            if pos and pos.book == "intraday":
-                pos.stop_price = stop
-
     trade_stream = TradeUpdateStream(s.alpaca_api_key, s.alpaca_secret_key,
-                                     paper=True, on_fill=_on_fill_event)
+                                     paper=True, on_fill=make_fill_handler(engine, om))
     tasks = [
         stream.run_forever(),
         trade_stream.run_forever(),
@@ -270,7 +339,8 @@ async def _run(tier_name: str) -> None:
         engine.day_roll(),
         _day_scanner(engine, stream, s, tier),
     ]
-    log.info("engine.start", tier=tier_name, universe=len(tier.universe))
+    log.info("engine.start", tier=tier_name, universe=len(tier.universe),
+             scalp_profile=s.scalp_profile)
     await asyncio.gather(*tasks)
 
 

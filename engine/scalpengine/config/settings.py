@@ -41,6 +41,7 @@ class Settings(BaseSettings):
 
     # engine
     risk_tier: str = "medium"
+    scalp_profile: str = "off"  # off | small | large
     bar_interval_s: int = 60
     signal_bar_interval_s: int = 300
     history_warmup_days: int = 30

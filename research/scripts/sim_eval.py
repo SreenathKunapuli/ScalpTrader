@@ -41,7 +41,8 @@ CORPUS_DIR = ROOT / "data" / "corpus" / "1s"
 
 
 def day_entries(bars: pd.DataFrame, model, cfg: TrainConfig,
-                threshold: float, qty: int) -> tuple[pd.DataFrame, pd.DataFrame]:
+                threshold: float, qty: int,
+                exec_stop_mult: float = 1.0) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Entry decisions for one stock-day + their barrier-assumption edges.
 
     Gating mirrors the live engine: barriers warm (finite), NBBO valid at
@@ -70,7 +71,7 @@ def day_entries(bars: pd.DataFrame, model, cfg: TrainConfig,
     entries = pd.DataFrame({
         "qty": qty,
         "target_px": ask[sel] + tgt[sel],
-        "stop_px": ask[sel] - stp[sel],
+        "stop_px": ask[sel] - stp[sel] * exec_stop_mult,
         "deadline": idx + pd.Timedelta(seconds=cfg.timeout_s),
     }, index=idx)
     # barrier-assumption outcome for the same decisions, from the labeler
@@ -94,6 +95,11 @@ def main() -> None:
     p.add_argument("--vol-window", type=int, default=300)
     p.add_argument("--timeout", type=int, default=120)
     p.add_argument("--threshold", type=float, default=0.6)
+    p.add_argument("--exec-stop-mult", type=float, default=1.0,
+                   help="execution stop distance as a multiple of the LABEL "
+                        "stop (decouples the bracket from the label geometry; "
+                        "large value ~ timeout-only exits with the timeout "
+                        "bounding risk)")
     p.add_argument("--qty", type=int, default=1000)
     p.add_argument("--max-participation", type=float, default=0.05)
     p.add_argument("--maker-wait", type=int, default=30)
@@ -136,7 +142,8 @@ def main() -> None:
     n_attempted = 0
     for i, f in enumerate(sorted(test_files)):
         bars = pd.read_parquet(f)
-        entries, lab = day_entries(bars, model, cfg, args.threshold, args.qty)
+        entries, lab = day_entries(bars, model, cfg, args.threshold, args.qty,
+                                   args.exec_stop_mult)
         if entries.empty:
             continue
         n_attempted += len(entries)

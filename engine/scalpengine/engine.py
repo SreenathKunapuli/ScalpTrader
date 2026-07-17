@@ -27,6 +27,7 @@ from .config.tiers import TIERS, Tier, TierConfig
 from .data import calendar
 from .data.bar_builder import Bar, BarBuilder, aggregate
 from .data.second_bars import SecondBarBuilder
+from .data.staleness import QuoteStalenessTracker
 from .execution.brackets import BracketAction, BracketBook
 from .execution.order_manager import OrderManager, is_target_coid
 from .persistence.repo import Repo
@@ -102,6 +103,11 @@ class Engine:
         # .threshold and .compute_second(symbol, frame) -> ScalpDecision|None)
         self.second_bars = SecondBarBuilder()
         self.scalp_signal: Any | None = None
+        # quote-staleness instrumentation (Phase 5)
+        self.staleness = QuoteStalenessTracker(
+            pause_s=float(settings.staleness_pause_s),
+            kill_s=float(settings.staleness_kill_s),
+        )
 
     # ---------------- data path ---------------- #
     def warmup(self, history: dict[str, list[Bar]]) -> None:
@@ -140,7 +146,9 @@ class Engine:
 
     async def on_quote(self, symbol: str, ts: datetime, bid: float, bid_sz: int,
                        ask: float, ask_sz: int) -> None:
-        self.state.last_data_ts = datetime.now(UTC)
+        now = datetime.now(UTC)
+        self.state.last_data_ts = now
+        self.staleness.record(symbol, quote_ts=ts, recv_ts=now)
         self._last_quote[symbol] = (bid, ask)
         if bid > 0 and ask > bid:
             self._spread_acc[symbol].append(ask - bid)
@@ -537,15 +545,18 @@ class Engine:
                     "entry_signals": p.entry_signals,
                 }
             pos_payload = [_pos_dict(p) for p in self.state.positions.values()]
+            staleness_payload = self.staleness.snapshot(now)
             self.repo.update_state(heartbeat_ts=now, last_data_ts=self.state.last_data_ts,
                                    peak_equity=self.state.peak_equity,
-                                   positions_json=pos_payload)
+                                   positions_json=pos_payload,
+                                   staleness_json=staleness_payload)
             self.repo.add_equity_snapshot(now, self.state.equity, self.state.cash,
                                           self.state.gross_exposure)
             await self.pubsub.publish("equity", {
                 "ts": now.isoformat(), "equity": self.state.equity,
                 "cash": self.state.cash, "gross": self.state.gross_exposure})
             await self.pubsub.publish("positions", {"positions": pos_payload})
+            await self.pubsub.publish("staleness", staleness_payload)
 
     async def command_poller(self) -> None:
         """API -> engine control channel (kill / reset / set_tier)."""

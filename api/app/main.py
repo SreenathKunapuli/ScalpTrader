@@ -242,6 +242,14 @@ def engine_status(_: dict = Depends(require_auth)) -> dict[str, Any]:  # type: i
             "trading_mode": settings.trading_mode}
 
 
+@app.get("/staleness")
+def staleness(_: dict = Depends(require_auth)) -> dict[str, Any]:  # type: ignore[type-arg]
+    """Per-symbol quote staleness snapshot persisted by the engine heartbeat.
+    Readable by owner AND guest (same pattern as /engine/status)."""
+    st = repo.get_state()
+    return st.staleness_json or {}
+
+
 @app.put("/config/tier")
 def set_tier(body: TierBody, _: dict = Depends(require_owner)) -> dict[str, str]:  # type: ignore[type-arg]
     if body.tier not in [t.value for t in Tier]:

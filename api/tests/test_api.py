@@ -133,6 +133,50 @@ def test_metrics_golden() -> None:
     assert m["sharpe_daily_annualized"] != 0.0
 
 
+async def test_staleness_endpoint(client, client_repo) -> None:  # type: ignore[no-untyped-def]
+    """GET /staleness: readable by owner and guest; returns staleness_json from EngineState."""
+    h = await _token(client)
+
+    # initially empty (no engine running)
+    r = await client.get("/staleness", headers=h)
+    assert r.status_code == 200
+    assert r.json() == {}
+
+    # write a staleness snapshot via update_state
+    snap = {"SPY": {"age_s": 3.5, "gap_p50_s": 1.0, "gap_p95_s": 2.1},
+            "QQQ": {"age_s": 1.2, "gap_p50_s": 0.8, "gap_p95_s": 1.5}}
+    client_repo.update_state(staleness_json=snap)
+
+    r = await client.get("/staleness", headers=h)
+    assert r.status_code == 200
+    data = r.json()
+    assert data["SPY"]["age_s"] == 3.5
+    assert data["QQQ"]["gap_p95_s"] == 1.5
+
+
+async def test_staleness_requires_auth(client, client_repo) -> None:  # type: ignore[no-untyped-def]
+    r = await client.get("/staleness")
+    assert r.status_code == 401
+
+
+async def test_staleness_readable_by_guest(client, client_repo, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Guest tokens (read-only) must be able to read /staleness."""
+    import api.app.auth as auth_mod
+    monkeypatch.setattr(auth_mod, "_attempts", __import__("collections").defaultdict(
+        lambda: __import__("collections").deque(maxlen=5)
+    ))
+    r = await client.post("/auth/guest")
+    assert r.status_code == 200
+    guest_h = {"Authorization": f"Bearer {r.json()['token']}"}
+
+    snap = {"AAPL": {"age_s": 5.0, "gap_p50_s": 1.2, "gap_p95_s": 3.0}}
+    client_repo.update_state(staleness_json=snap)
+
+    r = await client.get("/staleness", headers=guest_h)
+    assert r.status_code == 200
+    assert "AAPL" in r.json()
+
+
 async def test_ws_stream(client, client_repo) -> None:  # type: ignore[no-untyped-def]
     """WS: auth required; subscribed channel delivers a DB-polled event."""
     from starlette.testclient import TestClient

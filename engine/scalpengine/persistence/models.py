@@ -85,6 +85,7 @@ class EngineState(Base):
     heartbeat_ts: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_data_ts: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     positions_json: Mapped[list] = mapped_column(JSON, default=list)  # type: ignore[type-arg]
+    staleness_json: Mapped[dict] = mapped_column(JSON, default=dict)  # type: ignore[type-arg]
 
 
 class RiskRejection(Base):

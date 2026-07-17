@@ -39,9 +39,9 @@ class QuoteStalenessTracker:
         self._gaps: dict[str, deque] = defaultdict(deque)
 
     def record(self, symbol: str, quote_ts: datetime, recv_ts: datetime) -> None:
-        """One quote arrival. quote_ts = exchange stamp, recv_ts = local now;
-        the gap series uses recv-to-recv spacing (what the engine actually
-        experiences), while age() uses the exchange stamp."""
+        """One quote arrival. quote_ts = exchange stamp, recv_ts = local now.
+        The gap series measures exchange-stamp inter-arrival spacing; recv_ts
+        only keys the rolling-window pruning. age() uses the exchange stamp."""
         prev = self._last.get(symbol)
         if prev is not None:
             gap = (quote_ts - prev).total_seconds()

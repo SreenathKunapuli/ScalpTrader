@@ -18,6 +18,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
 import numpy as np
+import pandas as pd
 import structlog
 
 from .config.scalp_tiers import ScalpConfig
@@ -25,6 +26,7 @@ from .config.settings import Settings
 from .config.tiers import TIERS, Tier, TierConfig
 from .data import calendar
 from .data.bar_builder import Bar, BarBuilder, aggregate
+from .data.second_bars import SecondBarBuilder
 from .execution.brackets import BracketAction, BracketBook
 from .execution.order_manager import OrderManager, is_target_coid
 from .persistence.repo import Repo
@@ -95,6 +97,11 @@ class Engine:
         # bracket params staged at entry-submit time, armed on FILL (no bracket
         # before shares exist): symbol -> (qty, target_px, stop_px, deadline)
         self._pending_brackets: dict[str, tuple[int, float, float, datetime]] = {}
+        # second-cadence scalp path: builder always exists; the model is wired
+        # by cli when scalp_artifact_dir is configured (duck-typed: needs
+        # .threshold and .compute_second(symbol, frame) -> ScalpDecision|None)
+        self.second_bars = SecondBarBuilder()
+        self.scalp_signal: Any | None = None
 
     # ---------------- data path ---------------- #
     def warmup(self, history: dict[str, list[Bar]]) -> None:
@@ -125,6 +132,8 @@ class Engine:
         self._flow_acc[symbol] += sign * size
         self._flow_tot[symbol] += size
         self._last_px[symbol] = price
+        if self.scalp_signal is not None:
+            self.second_bars.add_trade(symbol, price, size, ts)
         pos = self.state.positions.get(symbol)
         if pos:
             pos.mark = price
@@ -138,6 +147,8 @@ class Engine:
         denom = bid_sz + ask_sz
         if denom > 0:
             self._qimb_acc[symbol].append((bid_sz - ask_sz) / denom)
+        if self.scalp_signal is not None:
+            self.second_bars.add_quote(symbol, bid, ask, bid_sz, ask_sz, ts)
         # scalp fast path: per-tick stop/timeout check. Only this symbol's
         # just-received quote is passed — never a stale mark — and an invalid
         # quote (zero/crossed) must not fire a stop.
@@ -368,6 +379,77 @@ class Engine:
         except Exception as exc:
             log.error("bracket.target_cancel_failed", symbol=symbol,
                       error=str(exc))
+
+    async def scalp_loop(self) -> None:
+        """Second-cadence decision loop: poll finalized 1s bars and let the
+        scalp model strike. Inert unless cli wired a model artifact."""
+        if self.scalp_signal is None or self.scalp_cfg is None:
+            return
+        while True:
+            await asyncio.sleep(0.25)
+            now = datetime.now(UTC)
+            finalized = self.second_bars.poll(now)
+            if not finalized:
+                continue
+            if self.state.halted or self.state.intraday_halted \
+                    or self._paused_stale or not calendar.in_entry_window(now):
+                continue
+            for symbol in {s for s, _, _ in finalized}:
+                try:
+                    await self._maybe_scalp(symbol, now)
+                except Exception as exc:  # decision errors must not kill the loop
+                    log.error("scalp.decision_failed", symbol=symbol,
+                              error=str(exc))
+
+    async def _maybe_scalp(self, symbol: str, now: datetime) -> None:
+        """One scalp decision on `symbol`'s latest finalized second bar."""
+        pos = self.state.positions.get(symbol)
+        if (pos and pos.qty != 0) or symbol in self._pending_brackets:
+            return  # one scalp per symbol; entry already working
+        frame = self.second_bars.get_frame(symbol)
+        dec = self.scalp_signal.compute_second(symbol, frame)
+        if dec is None or dec.p_win < self.scalp_signal.threshold:
+            return
+        last = frame.iloc[-1]
+        price = float(last["ask"])
+        # research sizing head; scalp_gbt's import already put research on
+        # sys.path (this method only runs when a model is wired)
+        from scalp.sizing import size_scalp
+        qty = size_scalp(dec.p_win, dec.target_ps, dec.stop_ps, price,
+                         self.state.equity,
+                         float(frame["volume"].iloc[-60:].sum()),
+                         float(last["ask_size"]) if pd.notna(last["ask_size"])
+                         else 0.0,
+                         self.scalp_cfg)
+        if qty <= 0:
+            return
+        intent = OrderIntent(symbol=symbol, side="buy", qty=qty,
+                             price_hint=price, reason="scalp")
+        approval = self.risk.approve(intent, now)
+        if isinstance(approval, Rejection):
+            self.repo.add_rejection(approval.reason, intent.as_dict())
+            log.info("scalp.rejected", symbol=symbol, reason=approval.reason)
+            return
+        bid = float(last["bid"])
+        try:
+            order = await self.om.submit(approval, frame.index[-1],
+                                         mid=(bid + price) / 2,
+                                         spread=price - bid)
+        except Exception as exc:
+            log.error("scalp.submit_failed", symbol=symbol, error=str(exc))
+            if self.kill.record_broker_error():
+                await self.kill.fire("5 consecutive broker errors in 60s")
+            return
+        if order:
+            self._pending_brackets[symbol] = (
+                qty, price + dec.target_ps, price - dec.stop_ps,
+                now + timedelta(seconds=dec.timeout_s))
+            log.info("scalp.entry", symbol=symbol, qty=qty, px=price,
+                     p_win=round(dec.p_win, 3),
+                     tgt=round(dec.target_ps, 4), stp=round(dec.stop_ps, 4))
+            await self.pubsub.publish("orders", {
+                "symbol": symbol, "side": "buy", "qty": qty,
+                "ts": now.isoformat(), "reason": "scalp"})
 
     async def _flatten_intraday(self, reason: str) -> None:
         """Graceful exit (urgent limit -> market) of every intraday-book

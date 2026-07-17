@@ -310,6 +310,12 @@ async def _run(tier_name: str) -> None:
     ensemble = Ensemble([MomentumSignal(), MeanReversionSignal()])
     scalp_cfg = resolve_scalp_profile(s.scalp_profile)
     engine = Engine(s, tier, repo, om, ensemble, state, pubsub, scalp_cfg=scalp_cfg)
+    if scalp_cfg is not None and s.scalp_artifact_dir:
+        from .signals.scalp_gbt import ScalpGbtSignal
+
+        engine.scalp_signal = ScalpGbtSignal(s.scalp_artifact_dir)
+        log.info("scalp.model_loaded", artifact=s.scalp_artifact_dir,
+                 threshold=engine.scalp_signal.threshold)
 
     await reconcile(broker, repo, state)
     if scalp_cfg is not None:
@@ -337,6 +343,7 @@ async def _run(tier_name: str) -> None:
         engine.heartbeat(),
         engine.command_poller(),
         engine.day_roll(),
+        engine.scalp_loop(),
         _day_scanner(engine, stream, s, tier),
     ]
     log.info("engine.start", tier=tier_name, universe=len(tier.universe),

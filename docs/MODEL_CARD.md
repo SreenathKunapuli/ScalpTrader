@@ -106,9 +106,16 @@ default 1000) — sizing still prices its Kelly loss leg off the label stop.
 8 morning-observable features (gap, prev-day liquidity, first-15-min tape;
 the 09:30–09:45 ET window is asserted inside the feature builder). Label =
 realized taker scalpability at 60s horizon from the viability study.
-**OOS rank-IC 0.7326**, near-monotone deciles (bottom ~$4.5k → top
-$36–48k realized). Small sample: 110 train / 39 test rows.
-Artifacts: `runs/scanner/` via `research/scripts/train_scanner.py`.
+An adversarial review caught a train/serve provenance skew in the prev-day
+volume features (training used the prior RUNNER-INDEX row, median 42 days
+stale; serving uses the true prior calendar session) — fixed by deriving
+training fields from the daily-raw cache, matching serving exactly.
+**OOS rank-IC 0.7022 on clean provenance** (was 0.7326 on the skewed
+features — the honest direction), near-monotone deciles (bottom ~$4.5k →
+top ~$42–43k realized). Small sample: 110 train / 39 test rows.
+Deployed artifact with model.joblib: `runs/scanner/20260717_171507`;
+live path: `engine/scalpengine/scanner/live_scan.py`, invoked at 10:01 ET
+(post-SIP-embargo) by the day scanner.
 
 ## Known caveats
 

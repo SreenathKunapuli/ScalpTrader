@@ -93,8 +93,10 @@ def main() -> None:
         imp = pd.Series(dtype=float)
     if imp.empty:  # HistGBT has no impurity importances; use permutation on a sample
         from sklearn.inspection import permutation_importance
-        samp = x_te.sample(min(5000, len(x_te)), random_state=0)
-        r = permutation_importance(model, samp, y_te.loc[samp.index],
+        # positional sampling — index labels repeat across stock-days
+        rng = np.random.default_rng(0)
+        pos = rng.choice(len(x_te), min(5000, len(x_te)), replace=False)
+        r = permutation_importance(model, x_te.iloc[pos], y_te.iloc[pos],
                                    n_repeats=3, random_state=0)
         imp = pd.Series(r.importances_mean, index=x_te.columns)
     imp.sort_values(ascending=False).to_csv(out / "feature_importances.csv")

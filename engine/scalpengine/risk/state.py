@@ -44,6 +44,9 @@ class PortfolioState:
     # scoped halt: day-scoped, cleared at day roll, never persists as HALTED.
     intraday_halted: bool = False        # intraday book: no entries, flattened
     intraday_realized_today: float = 0.0  # closed intraday PnL since day roll
+    # per-symbol closed PnL since day roll, for the scalp per-symbol loss cap.
+    # day_roll clears this (wiring is engine-side, later).
+    symbol_realized_today: dict[str, float] = field(default_factory=dict)
 
     @property
     def gross_exposure(self) -> float:

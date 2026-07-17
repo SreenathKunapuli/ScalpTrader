@@ -53,6 +53,11 @@ def make_client_order_id(strategy: str, symbol: str, side: str, bar_ts: datetime
     return hashlib.sha1(raw.encode()).hexdigest()[:32]
 
 
+def is_target_coid(coid: str) -> bool:
+    """True for a bracket take-profit order id (see submit_bracket_target)."""
+    return coid.endswith("-tgt")
+
+
 class OrderManager:
     def __init__(self, broker: AlpacaBroker, repo: Repo, state: PortfolioState) -> None:
         self._broker = broker
@@ -92,6 +97,31 @@ class OrderManager:
         else:
             _schedule(UNFILLED_REPLACE_S,
                       lambda: self._repeg_entry(order, intent.reason, mid))
+        return order
+
+    async def submit_bracket_target(self, symbol: str, qty: int, limit_px: float,
+                                    entry_coid: str) -> BrokerOrder | None:
+        """Rest a SELL limit at the scalp's take-profit price.
+
+        This is the bracket's target leg. Unlike submit(), it schedules NO
+        follow-ups: it rests until the bracket logic (stop/timeout fire) cancels
+        or replaces it. The coid is derived from the entry so it is idempotent
+        and identifiable via is_target_coid; duplicate submission is swallowed
+        exactly as in submit()."""
+        coid = f"{entry_coid[:24]}-tgt"
+        try:
+            order = await self._broker.submit_order(
+                symbol=symbol, side="sell", qty=qty, order_type="limit",
+                client_order_id=coid, limit_price=limit_px)
+        except Exception as exc:
+            if "client_order_id must be unique" in str(exc).lower():
+                log.info("order.duplicate_suppressed", coid=coid)
+                return None
+            raise
+        self.repo.upsert_order(coid, broker_order_id=order.id, symbol=symbol,
+                               side="sell", qty=qty, order_type="limit",
+                               limit_price=limit_px, status=order.status,
+                               ts=datetime.now(UTC), reason="target")
         return order
 
     async def _repeg_entry(self, order: BrokerOrder, reason: str, mid: float) -> None:
@@ -180,6 +210,8 @@ class OrderManager:
             pnl = (price - pos.entry_price) * closed * (1 if pos.qty > 0 else -1)
             if pos.book == "intraday":
                 self.state.intraday_realized_today += pnl
+            self.state.symbol_realized_today[symbol] = (
+                self.state.symbol_realized_today.get(symbol, 0.0) + pnl)
             self.repo.add_trade(symbol=symbol, side=side_str, qty=closed,
                                 entry_ts=pos.entry_ts or now, exit_ts=now,
                                 entry_price=pos.entry_price, exit_price=price,

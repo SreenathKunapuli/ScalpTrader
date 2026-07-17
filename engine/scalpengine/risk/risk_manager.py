@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal
 
+from ..config.scalp_tiers import ScalpConfig
 from ..config.tiers import TierConfig
 from ..data import calendar
 from .state import PortfolioState
@@ -51,9 +52,11 @@ class Rejection:
 
 
 class RiskManager:
-    def __init__(self, tier: TierConfig, state: PortfolioState) -> None:
+    def __init__(self, tier: TierConfig, state: PortfolioState,
+                 scalp_cfg: ScalpConfig | None = None) -> None:
         self.tier = tier
         self.state = state
+        self.scalp_cfg = scalp_cfg
         self._dynamic_universe: set[str] = set()
 
     def add_to_universe(self, symbols: list[str]) -> None:
@@ -114,6 +117,16 @@ class RiskManager:
             delta = intent.qty if intent.side == "buy" else -intent.qty
             if s.intraday_halted:
                 return Rejection(intent, "intraday book halted")
+            if self.scalp_cfg is not None:
+                sc = self.scalp_cfg
+                if not sc.price_min <= intent.price_hint <= sc.price_max:
+                    return Rejection(intent, "outside scalp price band")
+                if (s.symbol_realized_today.get(intent.symbol, 0.0)
+                        <= -sc.per_symbol_loss_cap_pct * s.equity):
+                    return Rejection(intent, "per-symbol loss cap")
+                new_scalp = intent.symbol not in s.book_positions("intraday")
+                if new_scalp and len(s.book_positions("intraday")) >= sc.max_open_scalps:
+                    return Rejection(intent, "max concurrent scalps")
             if (cur_qty + delta) < 0 and not t.allow_short:
                 return Rejection(intent, "shorting not allowed in this tier")
             if self._post_trade_position_value(intent) > t.max_position_pct * s.equity + 1e-6:

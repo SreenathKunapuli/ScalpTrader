@@ -6,6 +6,7 @@ from datetime import UTC
 
 from hypothesis import given
 from hypothesis import strategies as st
+from scalpengine.config.scalp_tiers import SCALP_LARGE
 from scalpengine.config.tiers import TIERS, Tier
 from scalpengine.risk.risk_manager import Approval, OrderIntent, Rejection, RiskManager
 from scalpengine.risk.sizing import size_position
@@ -129,3 +130,65 @@ def test_exit_bypasses_windows_but_not_direction(state) -> None:  # type: ignore
     assert isinstance(ok, Approval)
     bad = rm.approve_exit(_intent(side="buy", qty=10))  # would increase exposure
     assert isinstance(bad, Rejection)
+
+
+# ---------- scalp_cfg checks (only active when RiskManager has scalp_cfg) ---------- #
+def _scalp_rm(state) -> RiskManager:  # type: ignore[no-untyped-def]
+    return RiskManager(MED, state, scalp_cfg=SCALP_LARGE)
+
+
+def test_scalp_price_band_rejects_out_of_band(state) -> None:  # type: ignore[no-untyped-def]
+    rm = _scalp_rm(state)
+    # SCALP_LARGE band is [0.5, 10.0]; 100.0 is above price_max
+    r = rm.approve(_intent(price=100.0, qty=1), IN_SESSION)
+    assert isinstance(r, Rejection) and "price band" in r.reason
+    # below price_min
+    r2 = rm.approve(_intent(price=0.25, qty=1), IN_SESSION)
+    assert isinstance(r2, Rejection) and "price band" in r2.reason
+
+
+def test_scalp_price_band_allows_in_band(state) -> None:  # type: ignore[no-untyped-def]
+    rm = _scalp_rm(state)
+    r = rm.approve(_intent(price=5.0, qty=1), IN_SESSION)
+    assert isinstance(r, Approval)
+
+
+def test_scalp_per_symbol_loss_cap_blocks_that_symbol_only(state) -> None:  # type: ignore[no-untyped-def]
+    rm = _scalp_rm(state)
+    # per_symbol_loss_cap_pct = 0.01 of 100k equity = -1000 threshold
+    state.symbol_realized_today["AAPL"] = -1_000.0
+    r = rm.approve(_intent(symbol="AAPL", price=5.0, qty=1), IN_SESSION)
+    assert isinstance(r, Rejection) and "per-symbol loss cap" in r.reason
+    # a DIFFERENT symbol (no realized loss) is unaffected
+    ok = rm.approve(_intent(symbol="MSFT", price=5.0, qty=1), IN_SESSION)
+    assert isinstance(ok, Approval)
+
+
+def test_scalp_per_symbol_cap_still_allows_exit(state) -> None:  # type: ignore[no-untyped-def]
+    rm = _scalp_rm(state)
+    state.symbol_realized_today["AAPL"] = -2_000.0  # well past the cap
+    state.positions["AAPL"] = Position(symbol="AAPL", qty=100, entry_price=5.0, mark=5.0)
+    # exit path bypasses the entry-only scalp checks
+    ok = rm.approve_exit(_intent(symbol="AAPL", side="sell", qty=100,
+                                 price=5.0, reason="stop"))
+    assert isinstance(ok, Approval)
+
+
+def test_scalp_max_open_scalps_rejects_new_symbol(state) -> None:  # type: ignore[no-untyped-def]
+    rm = _scalp_rm(state)
+    # SCALP_LARGE.max_open_scalps = 5; fill the intraday book with 5 names
+    for sym in MED.universe[:5]:
+        state.positions[sym] = Position(symbol=sym, qty=1, entry_price=5.0, mark=5.0)
+    r = rm.approve(_intent(symbol="AAPL", price=5.0, qty=1), IN_SESSION)
+    assert isinstance(r, Rejection) and "max concurrent scalps" in r.reason
+    # adding to an EXISTING scalp symbol is not a new scalp -> allowed
+    ok = rm.approve(_intent(symbol=MED.universe[0], price=5.0, qty=1), IN_SESSION)
+    assert isinstance(ok, Approval)
+
+
+def test_scalp_checks_inert_without_cfg(state) -> None:  # type: ignore[no-untyped-def]
+    # default RiskManager (scalp_cfg=None) ignores band/symbol-cap entirely
+    rm = RiskManager(MED, state)
+    state.symbol_realized_today["AAPL"] = -50_000.0
+    r = rm.approve(_intent(price=100.0), IN_SESSION)
+    assert isinstance(r, Approval)

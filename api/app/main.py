@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import zoneinfo
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -137,6 +138,41 @@ def trades(since: str | None = None, limit: int = Query(100, le=1000),
             "pnl": round(t.pnl, 2), "signal_scores": t.signal_scores_json,
             "holding_seconds": (t.exit_ts - t.entry_ts).total_seconds(),
         } for t in s.scalars(q)]
+
+
+@app.get("/trades/today")
+def trades_today(_: dict = Depends(require_auth)) -> dict[str, Any]:  # type: ignore[type-arg]
+    """Closed trades since the most recent US/Eastern midnight + summary."""
+    ny = zoneinfo.ZoneInfo("America/New_York")
+    midnight_et = datetime.now(ny).replace(hour=0, minute=0, second=0, microsecond=0)
+    cutoff = midnight_et.astimezone(UTC)
+    with repo.session() as s:
+        q = (select(Trade).where(Trade.exit_ts >= cutoff)
+             .order_by(Trade.exit_ts.desc()))
+        rows = [{
+            "symbol": t.symbol, "side": t.side, "qty": t.qty,
+            "entry_ts": iso_utc(t.entry_ts), "exit_ts": iso_utc(t.exit_ts),
+            "entry_price": t.entry_price, "exit_price": t.exit_price,
+            "pnl": round(t.pnl, 2),
+            "holding_seconds": (t.exit_ts - t.entry_ts).total_seconds(),
+        } for t in s.scalars(q)]
+    pnls = [r["pnl"] for r in rows]
+    wins = [p for p in pnls if p > 0]
+    losses = [p for p in pnls if p <= 0]
+    return {"trades": rows, "summary": {
+        "n": len(pnls), "total_pnl": round(sum(pnls), 2),
+        "hit_rate": round(len(wins) / len(pnls), 4) if pnls else 0.0,
+        "avg_win": round(sum(wins) / len(wins), 2) if wins else 0.0,
+        "avg_loss": round(sum(losses) / len(losses), 2) if losses else 0.0,
+    }}
+
+
+@app.get("/scanner/watchlist")
+def scanner_watchlist(_: dict = Depends(require_auth)) -> dict[str, Any]:  # type: ignore[type-arg]
+    """Latest scanner watchlist snapshot (empty until the engine writes one)."""
+    rows = repo.get_watchlist()
+    return {"ts": iso_utc(rows[0]["ts"]) if rows else None,
+            "rows": [{**r, "ts": iso_utc(r["ts"])} for r in rows]}
 
 
 @app.get("/equity-curve")

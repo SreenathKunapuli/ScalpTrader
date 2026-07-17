@@ -23,6 +23,7 @@ from .models import (
     SignalHealth,
     SignalRecord,
     Trade,
+    WatchlistEntry,
     utcnow,
 )
 
@@ -116,3 +117,33 @@ class Repo:
         with self.session() as s:
             s.add(Command(command=command, payload_json=payload or {}))
             s.commit()
+
+    # --- watchlist ---
+    def replace_watchlist(self, rows: list[dict[str, Any]]) -> None:
+        """Transactionally delete all existing watchlist rows, then insert fresh ones."""
+        with self.session() as s:
+            s.query(WatchlistEntry).delete()
+            for r in rows:
+                s.add(WatchlistEntry(**r))
+            s.commit()
+
+    def get_watchlist(self) -> list[dict[str, Any]]:
+        """Return the latest watchlist snapshot ordered by score descending."""
+        with self.session() as s:
+            entries = list(
+                s.scalars(select(WatchlistEntry).order_by(WatchlistEntry.score.desc()))
+            )
+            return [
+                {
+                    "id": e.id,
+                    "ts": e.ts,
+                    "symbol": e.symbol,
+                    "score": e.score,
+                    "price": e.price,
+                    "gain_pct": e.gain_pct,
+                    "relvol": e.relvol,
+                    "spread_bps": e.spread_bps,
+                    "streamed": e.streamed,
+                }
+                for e in entries
+            ]

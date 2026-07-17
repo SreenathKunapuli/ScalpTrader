@@ -115,3 +115,18 @@ class SignalHealth(Base):
     attributed_pnl_20s: Mapped[float] = mapped_column(Float)
     weight_multiplier: Mapped[float] = mapped_column(Float, default=1.0)
     flagged_for_retrain: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class WatchlistEntry(Base):
+    """Scanner watchlist snapshot — replaced wholesale each scan cycle."""
+
+    __tablename__ = "watchlist"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    symbol: Mapped[str] = mapped_column(String(16))
+    score: Mapped[float] = mapped_column(Float)
+    price: Mapped[float] = mapped_column(Float)
+    gain_pct: Mapped[float] = mapped_column(Float)
+    relvol: Mapped[float] = mapped_column(Float)
+    spread_bps: Mapped[float] = mapped_column(Float)
+    streamed: Mapped[bool] = mapped_column(Boolean, default=False)

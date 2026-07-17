@@ -161,10 +161,26 @@ def _pick_next(index: pd.DataFrame, done: set[tuple[str, str]],
     return out
 
 
-def fetch(n: int) -> None:
-    """Stage 2: tick trades+quotes -> 1s bar parquet per stock-day."""
+FETCH_DAY_TIMEOUT_S = 240  # observed live hang: one stuck API call froze the
+#                            whole run for 74 min — bound each stock-day hard
+
+
+def _fetch_one(client, sym: str, start, end):  # noqa: ANN001 — alpaca types
     from alpaca.data.enums import DataFeed
     from alpaca.data.requests import StockQuotesRequest, StockTradesRequest
+    tr = client.get_stock_trades(StockTradesRequest(
+        symbol_or_symbols=sym, start=start.to_pydatetime(),
+        end=end.to_pydatetime(), feed=DataFeed.SIP)).df
+    qu = client.get_stock_quotes(StockQuotesRequest(
+        symbol_or_symbols=sym, start=start.to_pydatetime(),
+        end=end.to_pydatetime(), feed=DataFeed.SIP)).df
+    return tr, qu
+
+
+def fetch(n: int) -> None:
+    """Stage 2: tick trades+quotes -> 1s bar parquet per stock-day."""
+    from concurrent.futures import ThreadPoolExecutor
+    from concurrent.futures import TimeoutError as FutTimeout
 
     index = pd.read_parquet(INDEX_PATH)
     man = _manifest()
@@ -176,6 +192,7 @@ def fetch(n: int) -> None:
     client = _client()
     CORPUS_DIR.mkdir(parents=True, exist_ok=True)
 
+    pool = ThreadPoolExecutor(max_workers=1)
     for j, (sym, date, score) in enumerate(todo, 1):
         day = pd.Timestamp(date, tz="America/New_York")
         start = (day + pd.Timedelta(hours=9, minutes=25)).tz_convert("UTC")
@@ -183,12 +200,14 @@ def fetch(n: int) -> None:
         t0 = time.time()
         status, rows, ntr = "ok", 0, 0
         try:
-            tr = client.get_stock_trades(StockTradesRequest(
-                symbol_or_symbols=sym, start=start.to_pydatetime(),
-                end=end.to_pydatetime(), feed=DataFeed.SIP)).df
-            qu = client.get_stock_quotes(StockQuotesRequest(
-                symbol_or_symbols=sym, start=start.to_pydatetime(),
-                end=end.to_pydatetime(), feed=DataFeed.SIP)).df
+            fut = pool.submit(_fetch_one, client, sym, start, end)
+            try:
+                tr, qu = fut.result(timeout=FETCH_DAY_TIMEOUT_S)
+            except FutTimeout:
+                # abandon the stuck call; its worker thread is unusable now,
+                # so replace the pool and move on
+                pool = ThreadPoolExecutor(max_workers=1)
+                raise TimeoutError(f"day fetch exceeded {FETCH_DAY_TIMEOUT_S}s")
             if tr.empty:
                 status = "empty"
             else:

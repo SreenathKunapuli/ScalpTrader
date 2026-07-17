@@ -1,0 +1,67 @@
+# fly.toml — Fly.io app manifest for scalptrader-api
+#
+# Deploy from REPO ROOT (build context must be root so pyproject.toml and
+# engine/ source are included):
+#   fly deploy                     # Fly uses this file + repo root as context
+#
+# Secrets (never committed — set via `fly secrets set KEY=value`):
+#   DATABASE_URL   postgresql://user:pass@host/db?sslmode=require
+#   APP_PASSWORD   owner dashboard password
+#   JWT_SECRET     random 32+ char string  (openssl rand -hex 32)
+#   CORS_ORIGINS   https://your-app.vercel.app  (comma-sep if multiple)
+#
+# Optional secrets:
+#   REDIS_URL      redis://... (only if you add pub-sub later)
+
+app = "scalptrader-api"   # ← replace with your Fly app name after `fly launch`
+primary_region = "iad"    # US-East; change to region closest to your DB
+
+[build]
+  dockerfile = "api/Dockerfile"
+
+[env]
+  # Non-secret runtime config.  Secrets go in `fly secrets set`.
+  TRADING_MODE       = "paper"
+  SCALP_PROFILE      = "off"      # off | small | large — override as needed
+  DB_BACKEND         = "postgres"
+  BAR_INTERVAL_S     = "60"
+  SIGNAL_BAR_INTERVAL_S = "300"
+  HISTORY_WARMUP_DAYS   = "30"
+  JWT_EXPIRY_HOURS   = "24"
+  PORT               = "8080"
+  PYTHONUNBUFFERED   = "1"
+
+[[services]]
+  internal_port = 8080
+  protocol      = "tcp"
+  auto_stop_machines  = true   # spin down when idle (saves cost)
+  auto_start_machines = true   # spin up on first request
+
+  [[services.ports]]
+    port     = 80
+    handlers = ["http"]
+    force_https = true
+
+  [[services.ports]]
+    port     = 443
+    handlers = ["tls", "http"]
+
+  [services.concurrency]
+    type       = "connections"
+    hard_limit = 100
+    soft_limit = 80
+
+[checks]
+  [checks.healthz]
+    type     = "http"
+    port     = 8080
+    path     = "/healthz"
+    interval = "30s"
+    timeout  = "5s"
+    grace_period = "20s"
+    method   = "GET"
+
+[[vm]]
+  memory = "512mb"
+  cpu_kind = "shared"
+  cpus = 1

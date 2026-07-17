@@ -1,0 +1,17 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "nextjs",
+  "buildCommand": "npm run build",
+  "installCommand": "npm ci",
+  "outputDirectory": ".next",
+  "env": {
+    "API_INTERNAL_BASE": "https://scalptrader-api.fly.dev"
+  },
+  "build": {
+    "env": {
+      "API_INTERNAL_BASE": "https://scalptrader-api.fly.dev",
+      "NEXT_PUBLIC_API_BASE": "https://scalptrader-api.fly.dev",
+      "NEXT_PUBLIC_WS_BASE": "wss://scalptrader-api.fly.dev"
+    }
+  }
+}

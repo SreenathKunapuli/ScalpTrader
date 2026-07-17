@@ -441,8 +441,11 @@ class Engine:
                 await self.kill.fire("5 consecutive broker errors in 60s")
             return
         if order:
+            # bracket stop uses the EXECUTION distance (disaster-only per the
+            # sim study); the label stop above priced the Kelly loss leg
+            stop_ps = getattr(dec, "bracket_stop_ps", dec.stop_ps)
             self._pending_brackets[symbol] = (
-                qty, price + dec.target_ps, price - dec.stop_ps,
+                qty, price + dec.target_ps, price - stop_ps,
                 now + timedelta(seconds=dec.timeout_s))
             log.info("scalp.entry", symbol=symbol, qty=qty, px=price,
                      p_win=round(dec.p_win, 3),

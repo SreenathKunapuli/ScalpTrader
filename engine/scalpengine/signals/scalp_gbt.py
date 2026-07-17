@@ -39,9 +39,18 @@ from scalp.bars_features import build_features  # noqa: E402
 @dataclass(frozen=True)
 class ScalpDecision:
     p_win: float          # model probability of the WIN class
-    target_ps: float      # vol-scaled bracket legs, $/share off the entry
-    stop_ps: float
+    target_ps: float      # vol-scaled label geometry, $/share off the entry
+    stop_ps: float        # label stop — sizing's loss leg, NOT the bracket
     timeout_s: int
+    # execution stop distance (label stop x exec_stop_mult). The sim study
+    # (runs/sim_eval 2026-07-17) showed bid-triggered stops near the label
+    # distance pay 16-65c/sh gap-through slippage and destroy the edge;
+    # timeout-only exits with a far disaster stop are the validated shape.
+    exec_stop_ps: float | None = None
+
+    @property
+    def bracket_stop_ps(self) -> float:
+        return self.exec_stop_ps if self.exec_stop_ps is not None else self.stop_ps
 
 
 class ScalpGbtSignal(Signal):
@@ -63,6 +72,7 @@ class ScalpGbtSignal(Signal):
         self._vol_stop_mult: float = float(inf["vol_stop_mult"])
         self._min_target_ps: float = float(inf["min_target_ps"])
         self._min_stop_ps: float = float(inf["min_stop_ps"])
+        self._exec_stop_mult: float = float(inf.get("exec_stop_mult", 1.0))
         self._fixed_target_ps: float = float(inf["target_ps"])
         self._fixed_stop_ps: float = float(inf["stop_ps"])
         classes = list(self.model.classes_)
@@ -100,9 +110,12 @@ class ScalpGbtSignal(Signal):
         barriers = self._barriers(frame)
         if barriers is None:
             return None
+        exec_stop = barriers[1] * self._exec_stop_mult
         if self._win_col is None:      # trained without WIN labels: never enter
-            return ScalpDecision(0.0, barriers[0], barriers[1], self.timeout_s)
+            return ScalpDecision(0.0, barriers[0], barriers[1], self.timeout_s,
+                                 exec_stop)
         feats = build_features(frame).iloc[[-1]].reindex(
             columns=self.feature_order)
         p_win = float(self.model.predict_proba(feats)[0, self._win_col])
-        return ScalpDecision(p_win, barriers[0], barriers[1], self.timeout_s)
+        return ScalpDecision(p_win, barriers[0], barriers[1], self.timeout_s,
+                             exec_stop)

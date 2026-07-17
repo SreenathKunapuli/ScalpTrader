@@ -35,6 +35,10 @@ def main() -> None:
                    help="runs/scalper/<ts> dir holding config.json")
     p.add_argument("--threshold", type=float, required=True,
                    help="entry threshold chosen from that run's OOS report")
+    p.add_argument("--exec-stop-mult", type=float, default=1000.0,
+                   help="execution stop = label stop x this. Default 1000 "
+                        "(timeout-only exits; sim study showed nearby stops "
+                        "pay ruinous gap-through slippage)")
     args = p.parse_args()
 
     run_dir = (ROOT / args.run_dir).resolve()
@@ -64,6 +68,7 @@ def main() -> None:
         head = "unknown"
     (run_dir / "inference.json").write_text(json.dumps({
         "threshold": args.threshold,
+        "exec_stop_mult": args.exec_stop_mult,
         "timeout_s": cfg.timeout_s,
         "barrier_mode": cfg.barrier_mode,
         "vol_window_s": cfg.vol_window_s,

@@ -77,11 +77,29 @@ same shape with 26¢/sh stop slippage (runs/sim_eval/20260717_114814).
 
 **Conclusion**: the model's edge survives realistic entry fills, capacity
 caps, and bid-cross target fills. The tight vol-scaled stop leg is
-unenforceable on gap-prone tapes and is the entire loss. Execution stops
-must be decoupled from label geometry (`--exec-stop-mult`); results of the
-disaster-stop (3×) and timeout-only variants: see
-`runs/sim_eval/` latest runs (in flight at time of writing) and
-`runs/pipeline_report.json`.
+unenforceable on gap-prone tapes and is the entire loss.
+
+### Exec-stop decoupling experiments (same model/entries, bracket varied)
+
+122 OOS days, taker/maker PnL @≤1000sh:
+
+| threshold | exec stop | taker | maker | artifact |
+|---|---|---|---|---|
+| 0.6 | 1× (label) | −$186.7k | −$119.6k | 20260717_113818 |
+| 0.6 | 3× | −$126.1k | −$91.2k | 20260717_115923 |
+| 0.6 | timeout-only | −$16.5k | +$26.9k | 20260717_120950 |
+| 0.7 | 1× (label) | −$22.1k | −$12.1k | 20260717_114814 |
+| 0.7 | 3× | −$2.3k | +$8.4k | 20260717_121932 |
+| **0.7** | **timeout-only** | **+$19.4k (+5.86¢/sh)** | **+$36.4k (+10.38¢/sh)** | 20260717_122933 |
+
+Even 3× stops lose: when they trigger they pay 58–68¢/sh gap-through.
+**Validated config: threshold 0.7, timeout-only exits (far disaster stop),
+120s timeout.** Taker: 396 fills (~3.2/day), win rate 56.8%, median
++3¢/sh, p05 −83¢/sh, worst single trade −$3.0k — per-trade tail risk is
+bounded by the loss caps and daily breaker, not by a price stop (which the
+data shows cannot execute anywhere near its price on these tapes).
+Engine alignment: `inference.json exec_stop_mult` (export_model.py,
+default 1000) — sizing still prices its Kelly loss leg off the label stop.
 
 ## Scanner ranker (which stocks to watch)
 

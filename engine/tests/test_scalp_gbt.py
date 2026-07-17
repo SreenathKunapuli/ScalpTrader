@@ -86,6 +86,22 @@ def test_five_min_path_is_inert(artifact):
     assert sig.compute("XYZ", []) == SignalOutput(0.0, 0.0)
 
 
+def test_exec_stop_mult_decouples_bracket_from_label(artifact):
+    # default artifact (no exec_stop_mult key): bracket stop == label stop
+    sig = ScalpGbtSignal(artifact)
+    dec = sig.compute_second("XYZ", synth_frame())
+    assert dec.bracket_stop_ps == dec.stop_ps
+    # rewrite inference.json with the validated timeout-only geometry
+    inf = json.loads((artifact / "inference.json").read_text())
+    inf["exec_stop_mult"] = 1000.0
+    (artifact / "inference.json").write_text(json.dumps(inf))
+    sig2 = ScalpGbtSignal(artifact)
+    dec2 = sig2.compute_second("XYZ", synth_frame())
+    assert dec2.exec_stop_ps == pytest.approx(dec2.stop_ps * 1000.0)
+    assert dec2.bracket_stop_ps == dec2.exec_stop_ps
+    assert dec2.stop_ps == dec.stop_ps        # sizing's loss leg unchanged
+
+
 def test_no_win_class_never_signals(artifact, tmp_path):
     # retrain the artifact model without any WIN labels
     rng = np.random.default_rng(2)

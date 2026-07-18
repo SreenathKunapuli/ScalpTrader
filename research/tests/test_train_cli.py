@@ -7,9 +7,12 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import pytest
+from pathlib import Path
+
 from scalp.walkforward import TrainConfig, fit_model, split_days, split_val_days
 from scripts.sim_eval import day_entries
-from scripts.train_scalper import drop_columns, parse_drop_features
+from scripts.train_scalper import drop_columns, limit_by_quality, \
+    parse_drop_features
 
 
 def _xy(n: int = 200, seed: int = 0) -> tuple[pd.DataFrame, pd.Series]:
@@ -257,3 +260,46 @@ def test_day_entries_drops_features_before_predict():
     assert "spread_bps" not in _RecordingModel.seen_columns
     assert not entries.empty
     assert not lab.empty
+
+
+# --------------------------------------------------------------------------
+# --train-quality-limit corpus quality-depth knob
+# --------------------------------------------------------------------------
+
+def test_limit_by_quality_respects_top_n_membership():
+    """Only candidates within the first N entries of the manifest-ranked
+    file list survive; the relative order of `candidates` is preserved."""
+    ranked = [Path(f"{i}.parquet") for i in range(10)]  # quality-rank order
+    candidates = [ranked[2], ranked[5], ranked[8], ranked[1]]
+    out = limit_by_quality(candidates, ranked, limit=6)
+    assert out == [ranked[2], ranked[5], ranked[1]]
+
+
+def test_limit_by_quality_none_is_identity():
+    ranked = [Path(f"{i}.parquet") for i in range(5)]
+    candidates = [ranked[4], ranked[0], ranked[2]]
+    out = limit_by_quality(candidates, ranked, None)
+    assert out is candidates
+
+
+def test_limit_by_quality_val_test_untouched():
+    """The knob only ever filters a caller-selected candidate set (e.g.
+    core-train). Val/test file lists are simply never routed through the
+    helper, so they stay fully intact — even though the SAME limit, if
+    misapplied to them, would drop files (proving the filter has teeth)."""
+    ranked = [Path(f"{i}.parquet") for i in range(10)]
+    train_candidates = ranked[:8]
+    val_files = ranked[8:9]
+    test_files = ranked[9:10]
+    limit = 3
+
+    filtered_train = limit_by_quality(train_candidates, ranked, limit)
+    assert filtered_train == ranked[:3]
+    # if val/test were (wrongly) passed through the filter they'd be
+    # emptied out at this limit ...
+    assert limit_by_quality(val_files, ranked, limit) == []
+    assert limit_by_quality(test_files, ranked, limit) == []
+    # ... but the actual pipeline never calls the filter on them, so the
+    # lists the caller holds remain the untouched originals
+    assert val_files == ranked[8:9]
+    assert test_files == ranked[9:10]

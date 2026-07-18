@@ -23,7 +23,8 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scalp.viability import FeeModel  # noqa: E402
 from scalp.walkforward import TrainConfig, build_dataset, fit_model  # noqa: E402
-from scripts.train_scalper import drop_columns, parse_drop_features  # noqa: E402
+from scripts.train_scalper import drop_columns, limit_by_quality, \
+    parse_drop_features  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 MANIFEST = ROOT / "data" / "corpus" / "manifest.csv"
@@ -65,12 +66,22 @@ def main() -> None:
     files = [CORPUS_DIR / f"{r.symbol}_{r.date}.parquet"
              for r in ok.itertuples()
              if (CORPUS_DIR / f"{r.symbol}_{r.date}.parquet").exists()]
+    ranked_files = files  # manifest fetch-priority / quality-rank order,
+    # captured before any date filters below so --train-quality-limit's
+    # "first N rows" always means first N of the FULL manifest.
     if cfg.train_start_date is not None:
         # deployment fit = train+test window days, minus pre-cutoff vintage:
         # a run trained with --train-start-date shouldn't silently dilute
         # its deployment fit back in with the dropped older days.
         files = [f for f in files
                 if f.stem.rsplit("_", 1)[1] >= cfg.train_start_date]
+    train_quality_limit = saved.get("train_quality_limit")
+    if train_quality_limit is not None:
+        # mirror the corpus quality-depth knob the run was trained with —
+        # the deployment fit should match the evidence that validated it.
+        files = limit_by_quality(files, ranked_files, train_quality_limit)
+        print(f"  quality-limit: deployment fit restricted to top "
+              f"{train_quality_limit} manifest rows -> {len(files)} files")
     print(f"deployment fit on ALL {len(files)} stock-days "
           f"(config from {run_dir.name}) ...", flush=True)
     x, y, _ = build_dataset(files, cfg)
@@ -103,6 +114,7 @@ def main() -> None:
         "git_head": head,
         "hp": hp,
         "dropped_features": drop_feats,
+        "train_quality_limit": train_quality_limit,
     }, indent=2))
     print(f"artifact -> {run_dir}/{{model.joblib, features.json, inference.json}}")
 

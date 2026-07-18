@@ -49,6 +49,23 @@ def drop_columns(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
     return df.drop(columns=cols)
 
 
+def limit_by_quality(candidates: list[Path], ranked_files: list[Path],
+                     limit: int | None) -> list[Path]:
+    """Corpus quality-depth knob: restrict `candidates` to the files that
+    also appear among the first `limit` entries of `ranked_files` (manifest
+    fetch-priority / quality-rank order — index 0 is the highest-quality
+    row). `limit=None` is the identity (no filter, today's behavior).
+
+    This is applied ONLY to the training-FIT file set (core-train / the fit
+    set), never to val or test — those must be judged on identical days
+    regardless of this knob. Order and any duplicates in `candidates` are
+    preserved; only membership is tested."""
+    if limit is None:
+        return candidates
+    allowed = set(ranked_files[:limit])
+    return [f for f in candidates if f in allowed]
+
+
 def _git_head() -> str:
     try:
         return subprocess.run(["git", "rev-parse", "--short", "HEAD"],
@@ -95,6 +112,14 @@ def main() -> None:
                         "the trailing --val-frac fraction; passing this "
                         "alone (without --val-frac) still activates the "
                         "val split")
+    p.add_argument("--train-quality-limit", type=int, default=None,
+                   help="corpus quality-depth knob: after the day splits "
+                        "are computed on the full file list, restrict the "
+                        "TRAINING-FIT file set (core-train) to files among "
+                        "the first N rows of the manifest (status=='ok' "
+                        "rows, in fetch-priority / quality-rank order). "
+                        "Val and test file sets are NEVER filtered. "
+                        "None (default) applies no filter.")
     args = p.parse_args()
 
     cfg = TrainConfig(target_ps=args.target_ps, stop_ps=args.stop_ps,
@@ -135,6 +160,13 @@ def main() -> None:
     else:
         core_train_dates, val_dates = train_dates, []
         core_train_files, val_files = train_files, []
+
+    if args.train_quality_limit is not None:
+        core_train_files = limit_by_quality(core_train_files, files,
+                                            args.train_quality_limit)
+        print(f"  quality-limit: core-train restricted to top "
+              f"{args.train_quality_limit} manifest rows -> "
+              f"{len(core_train_files)} files")
 
     out = ROOT / args.out / time.strftime("%Y%m%d_%H%M%S")
     out.mkdir(parents=True, exist_ok=True)
@@ -178,6 +210,7 @@ def main() -> None:
         "l2_regularization": args.l2_regularization,
         "drop_features": drop_feats, "val_frac": args.val_frac,
         "val_start_date": args.val_start_date,
+        "train_quality_limit": args.train_quality_limit,
     }, indent=2))
     (out / "metrics.json").write_text(json.dumps(summary, indent=2, default=str))
     per_thr.to_csv(out / "per_threshold.csv", index=False)

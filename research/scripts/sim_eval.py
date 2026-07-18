@@ -34,7 +34,8 @@ from scalp.sim import SimConfig, simulate  # noqa: E402
 from scalp.triple_barrier import label_scalps  # noqa: E402
 from scalp.walkforward import TrainConfig, barrier_arrays, build_dataset, \
     fit_model, split_days  # noqa: E402
-from scripts.train_scalper import drop_columns, parse_drop_features  # noqa: E402
+from scripts.train_scalper import drop_columns, limit_by_quality, \
+    parse_drop_features  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 MANIFEST = ROOT / "data" / "corpus" / "manifest.csv"
@@ -126,6 +127,14 @@ def main() -> None:
                         "(yyyy-mm-dd), applied after the test/embargo "
                         "split so it never touches the test window — a "
                         "training-recency knob")
+    p.add_argument("--train-quality-limit", type=int, default=None,
+                   help="corpus quality-depth knob: after the day splits "
+                        "are computed on the full file list, restrict the "
+                        "TRAINING-FIT file set to files among the first N "
+                        "rows of the manifest (status=='ok' rows, in "
+                        "fetch-priority / quality-rank order). The test "
+                        "file set is NEVER filtered. None (default) "
+                        "applies no filter.")
     args = p.parse_args()
 
     cfg = TrainConfig(target_ps=args.target_ps, stop_ps=args.stop_ps,
@@ -153,6 +162,13 @@ def main() -> None:
     test_files = [f for f, d in zip(files, dates, strict=True) if d in test_dates]
     print(f"stock-days: {len(files)} -> train {len(train_files)} | "
           f"test {len(test_files)} | threshold {args.threshold}")
+
+    if args.train_quality_limit is not None:
+        train_files = limit_by_quality(train_files, files,
+                                       args.train_quality_limit)
+        print(f"  quality-limit: train fit restricted to top "
+              f"{args.train_quality_limit} manifest rows -> "
+              f"{len(train_files)} files")
 
     print("fitting model on train days ...", flush=True)
     x_tr, y_tr, _ = build_dataset(train_files, cfg)

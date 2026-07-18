@@ -45,6 +45,9 @@ class Settings(BaseSettings):
     # dir holding model.joblib/features.json/inference.json (export_model.py);
     # empty -> bracket paths active but the second-cadence model loop is off
     scalp_artifact_dir: str = ""
+    # absolute equity floor: kill + halt before the account sinks under the
+    # day-trading minimum (small-account mode). 0 = disabled.
+    min_equity_halt_usd: float = 0.0
     bar_interval_s: int = 60
     signal_bar_interval_s: int = 300
     history_warmup_days: int = 30

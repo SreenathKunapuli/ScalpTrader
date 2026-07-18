@@ -38,6 +38,7 @@ class KillSwitch:
                  staleness_kill_s: int = 180,
                  broker_error_count: int = 5, broker_error_window_s: int = 60,
                  flatten_intraday: Callable[[str], Awaitable[None]] | None = None,
+                 min_equity_usd: float | None = None,
                  ) -> None:
         # order_manager typed loosely to avoid an import cycle; it must expose
         # emergency_cancel_all() / emergency_flatten_all() / verify_flat().
@@ -50,6 +51,9 @@ class KillSwitch:
         self.emit = emit
         self.staleness_kill_s = staleness_kill_s
         self.flatten_intraday = flatten_intraday
+        # absolute equity floor: halt BEFORE the account can sink under the
+        # day-trading minimum (small-account mode; None = disabled)
+        self.min_equity_usd = min_equity_usd
         self._error_times: deque[float] = deque(maxlen=broker_error_count)
         self._error_threshold = broker_error_count
         self._error_window = broker_error_window_s
@@ -69,6 +73,9 @@ class KillSwitch:
         Called every bar/monitor tick."""
         now = now or datetime.now(UTC)
         s, t = self.state, self.tier
+        if self.min_equity_usd is not None and 0 < s.equity < self.min_equity_usd:
+            return ("account", f"equity floor: ${s.equity:,.0f} < "
+                               f"${self.min_equity_usd:,.0f} day-trading minimum")
         if s.drawdown_pct >= t.max_drawdown_pct:
             return ("account", f"account drawdown floor: {s.drawdown_pct:.2%}"
                                f" >= {t.max_drawdown_pct:.2%}")

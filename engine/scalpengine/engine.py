@@ -74,7 +74,8 @@ class Engine:
                                staleness_kill_s=settings.staleness_kill_s,
                                broker_error_count=settings.broker_error_kill_count,
                                broker_error_window_s=settings.broker_error_kill_window_s,
-                               flatten_intraday=self._flatten_intraday)
+                               flatten_intraday=self._flatten_intraday,
+                               min_equity_usd=settings.min_equity_halt_usd or None)
         self.builder = BarBuilder(interval_s=settings.bar_interval_s)
         self.bars_1m: dict[str, deque[Bar]] = defaultdict(lambda: deque(maxlen=12000))
         self.bars_5m: dict[str, deque[Bar]] = defaultdict(lambda: deque(maxlen=MAX_5M_BARS))

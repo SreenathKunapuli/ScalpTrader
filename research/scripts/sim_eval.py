@@ -121,6 +121,11 @@ def main() -> None:
                         "date (yyyy-mm-dd) instead of the trailing "
                         "test_frac fraction, so a growing corpus keeps a "
                         "comparable test set")
+    p.add_argument("--train-start-date", default=None,
+                   help="drop train days older than this ISO date "
+                        "(yyyy-mm-dd), applied after the test/embargo "
+                        "split so it never touches the test window — a "
+                        "training-recency knob")
     args = p.parse_args()
 
     cfg = TrainConfig(target_ps=args.target_ps, stop_ps=args.stop_ps,
@@ -128,7 +133,8 @@ def main() -> None:
                       vol_target_mult=args.vol_target_mult,
                       vol_stop_mult=args.vol_stop_mult,
                       vol_window_s=args.vol_window,
-                      test_start_date=args.test_start_date)
+                      test_start_date=args.test_start_date,
+                      train_start_date=args.train_start_date)
     drop_feats = parse_drop_features(args.drop_features)
     hp = dict(learning_rate=args.learning_rate, max_iter=args.max_iter,
              max_leaf_nodes=args.max_leaf_nodes,

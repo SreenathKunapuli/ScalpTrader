@@ -84,6 +84,17 @@ def main() -> None:
                         "date (yyyy-mm-dd) instead of the trailing "
                         "test_frac fraction, so a growing corpus keeps a "
                         "comparable test set")
+    p.add_argument("--train-start-date", default=None,
+                   help="drop train days older than this ISO date "
+                        "(yyyy-mm-dd), applied after the test/embargo "
+                        "split so it never touches the test window — a "
+                        "training-recency knob")
+    p.add_argument("--val-start-date", default=None,
+                   help="pin the inner validation window to all TRAIN "
+                        "days >= this ISO date (yyyy-mm-dd) instead of "
+                        "the trailing --val-frac fraction; passing this "
+                        "alone (without --val-frac) still activates the "
+                        "val split")
     args = p.parse_args()
 
     cfg = TrainConfig(target_ps=args.target_ps, stop_ps=args.stop_ps,
@@ -91,7 +102,8 @@ def main() -> None:
                       vol_target_mult=args.vol_target_mult,
                       vol_stop_mult=args.vol_stop_mult,
                       vol_window_s=args.vol_window,
-                      test_start_date=args.test_start_date)
+                      test_start_date=args.test_start_date,
+                      train_start_date=args.train_start_date)
     drop_feats = parse_drop_features(args.drop_features)
     hp = dict(learning_rate=args.learning_rate, max_iter=args.max_iter,
              max_leaf_nodes=args.max_leaf_nodes,
@@ -111,8 +123,9 @@ def main() -> None:
           f"(≤{max(train_dates) if train_dates else '-'}) | "
           f"test {len(test_files)} (≥{min(test_dates)})")
 
-    if args.val_frac > 0:
-        core_train_dates, val_dates = split_val_days(train_dates, args.val_frac)
+    if args.val_frac > 0 or args.val_start_date is not None:
+        core_train_dates, val_dates = split_val_days(
+            train_dates, args.val_frac, args.val_start_date)
         core_train_files = [f for f, d in zip(files, dates, strict=True)
                             if d in core_train_dates]
         val_files = [f for f, d in zip(files, dates, strict=True) if d in val_dates]
@@ -164,6 +177,7 @@ def main() -> None:
         "min_samples_leaf": args.min_samples_leaf,
         "l2_regularization": args.l2_regularization,
         "drop_features": drop_feats, "val_frac": args.val_frac,
+        "val_start_date": args.val_start_date,
     }, indent=2))
     (out / "metrics.json").write_text(json.dumps(summary, indent=2, default=str))
     per_thr.to_csv(out / "per_threshold.csv", index=False)

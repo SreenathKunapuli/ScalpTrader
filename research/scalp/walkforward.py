@@ -49,6 +49,11 @@ class TrainConfig:
     # comparable test set run over run. ISO "yyyy-mm-dd"; None preserves
     # the fraction-based split exactly.
     test_start_date: str | None = None
+    # When set, drops TRAIN days older than this ISO "yyyy-mm-dd" boundary
+    # (applied after the test/embargo split, so it never touches the test
+    # window) — a training-recency knob: fit on the most recent regime only
+    # instead of the full trailing history. None preserves today's behavior.
+    train_start_date: str | None = None
     max_rows_per_day: int = 2000
     clip_shares: int = 1000
     seed: int = 7
@@ -133,6 +138,11 @@ def split_days(dates: list[str], cfg: TrainConfig) -> tuple[list[str], list[str]
     the corpus: test = all days >= test_start_date, train = days strictly
     before it. This keeps the test window comparable as the corpus grows.
     None reproduces the fraction-based split exactly.
+
+    If cfg.train_start_date is set, TRAIN days older than that ISO date are
+    dropped AFTER the test/embargo split above, so it only ever trims the
+    train side and never touches the (already-fixed) test window — a
+    training-recency knob. None preserves today's behavior.
     """
     uniq = sorted(set(dates))
     if cfg.test_start_date is not None:
@@ -149,6 +159,8 @@ def split_days(dates: list[str], cfg: TrainConfig) -> tuple[list[str], list[str]
     first_test = pd.Timestamp(test[0])
     train = [d for d in train
              if (first_test - pd.Timestamp(d)).days > cfg.embargo_days]
+    if cfg.train_start_date is not None:
+        train = [d for d in train if d >= cfg.train_start_date]
     return train, test
 
 
@@ -178,12 +190,30 @@ def fit_model(x: pd.DataFrame, y: pd.Series, seed: int, *,
 
 
 def split_val_days(train_dates: list[str], val_frac: float,
+                   val_start_date: str | None = None,
                    ) -> tuple[list[str], list[str]]:
-    """Carve the LAST val_frac fraction of TRAIN days off as an inner
-    validation set, strictly temporal (no embargo — this is an inner split
-    of the train block, not the train/test boundary). val_frac<=0 returns
-    all dates as core-train and an empty val set."""
+    """Carve TRAIN days off as an inner validation set, strictly temporal
+    (no embargo — this is an inner split of the train block, not the
+    train/test boundary).
+
+    If val_start_date is set, it overrides val_frac entirely: val = all
+    TRAIN days >= val_start_date, core = the strictly-earlier TRAIN days.
+    core must be non-empty (raises ValueError otherwise) — this is a pinned
+    boundary, not a fraction, so an empty core is a caller error rather
+    than something to silently degrade.
+
+    Otherwise val_frac<=0 returns all dates as core-train and an empty val
+    set; val_frac>0 carves the LAST val_frac fraction off as val.
+    """
     uniq = sorted(set(train_dates))
+    if val_start_date is not None:
+        core = [d for d in uniq if d < val_start_date]
+        val = [d for d in uniq if d >= val_start_date]
+        if not core:
+            raise ValueError(
+                f"val_start_date={val_start_date!r} leaves no core-train days "
+                f"(earliest day in train is {uniq[0] if uniq else 'n/a'})")
+        return core, val
     if val_frac <= 0 or len(uniq) < 2:
         return uniq, []
     n_val = max(1, math.ceil(len(uniq) * val_frac))

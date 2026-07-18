@@ -65,6 +65,12 @@ def main() -> None:
     files = [CORPUS_DIR / f"{r.symbol}_{r.date}.parquet"
              for r in ok.itertuples()
              if (CORPUS_DIR / f"{r.symbol}_{r.date}.parquet").exists()]
+    if cfg.train_start_date is not None:
+        # deployment fit = train+test window days, minus pre-cutoff vintage:
+        # a run trained with --train-start-date shouldn't silently dilute
+        # its deployment fit back in with the dropped older days.
+        files = [f for f in files
+                if f.stem.rsplit("_", 1)[1] >= cfg.train_start_date]
     print(f"deployment fit on ALL {len(files)} stock-days "
           f"(config from {run_dir.name}) ...", flush=True)
     x, y, _ = build_dataset(files, cfg)

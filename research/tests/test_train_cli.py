@@ -126,6 +126,55 @@ def test_split_days_test_start_date_empty_test_raises():
 
 
 # --------------------------------------------------------------------------
+# --train-start-date training-recency filter
+# --------------------------------------------------------------------------
+
+def test_split_days_train_start_date_drops_only_pre_date_train_days():
+    dates = [f"2024-06-{d:02d}" for d in range(1, 21)]  # 20 unique days
+    cfg_base = TrainConfig(test_frac=0.25, embargo_days=1)
+    train_base, test_base = split_days(dates, cfg_base)
+
+    cfg_recent = TrainConfig(test_frac=0.25, embargo_days=1,
+                             train_start_date="2024-06-10")
+    train_recent, test_recent = split_days(dates, cfg_recent)
+
+    # test window is completely untouched by train_start_date
+    assert test_recent == test_base
+    # train side only loses days strictly before the cutoff
+    assert all(d >= "2024-06-10" for d in train_recent)
+    assert train_recent == [d for d in train_base if d >= "2024-06-10"]
+    assert len(train_recent) < len(train_base)
+
+
+def test_split_days_train_start_date_none_is_unchanged_behavior():
+    dates = [f"2024-06-{d:02d}" for d in range(1, 21)]
+    cfg_old = TrainConfig(test_frac=0.25, embargo_days=1)
+    cfg_new = TrainConfig(test_frac=0.25, embargo_days=1, train_start_date=None)
+    assert split_days(dates, cfg_old) == split_days(dates, cfg_new)
+
+
+# --------------------------------------------------------------------------
+# --val-start-date pinned validation window
+# --------------------------------------------------------------------------
+
+def test_split_val_days_val_start_date_carves_exact_range():
+    dates = [f"2024-06-{d:02d}" for d in range(1, 21)]  # 20 unique days
+    core, val = split_val_days(dates, val_frac=0.0, val_start_date="2024-06-15")
+    assert val == [f"2024-06-{d:02d}" for d in range(15, 21)]
+    assert core == [f"2024-06-{d:02d}" for d in range(1, 15)]
+    assert max(core) < min(val)
+    # val_start_date overrides val_frac entirely, even though val_frac=0.0
+    # would otherwise mean "no val split"
+    assert val
+
+
+def test_split_val_days_val_start_date_empty_core_raises():
+    dates = [f"2024-06-{d:02d}" for d in range(1, 6)]
+    with pytest.raises(ValueError, match="leaves no core-train days"):
+        split_val_days(dates, val_frac=0.2, val_start_date="2024-06-01")
+
+
+# --------------------------------------------------------------------------
 # --val-frac inner temporal split
 # --------------------------------------------------------------------------
 

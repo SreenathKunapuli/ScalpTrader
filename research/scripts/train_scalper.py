@@ -79,13 +79,19 @@ def main() -> None:
     p.add_argument("--val-frac", type=float, default=0.0,
                    help="carve this fraction of the LAST train days into an "
                         "inner validation set, evaluated before the OOS test")
+    p.add_argument("--test-start-date", default=None,
+                   help="pin the OOS test window to all days >= this ISO "
+                        "date (yyyy-mm-dd) instead of the trailing "
+                        "test_frac fraction, so a growing corpus keeps a "
+                        "comparable test set")
     args = p.parse_args()
 
     cfg = TrainConfig(target_ps=args.target_ps, stop_ps=args.stop_ps,
                       timeout_s=args.timeout, barrier_mode=args.barrier_mode,
                       vol_target_mult=args.vol_target_mult,
                       vol_stop_mult=args.vol_stop_mult,
-                      vol_window_s=args.vol_window)
+                      vol_window_s=args.vol_window,
+                      test_start_date=args.test_start_date)
     drop_feats = parse_drop_features(args.drop_features)
     hp = dict(learning_rate=args.learning_rate, max_iter=args.max_iter,
              max_leaf_nodes=args.max_leaf_nodes,

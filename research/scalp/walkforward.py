@@ -44,6 +44,11 @@ class TrainConfig:
     prob_threshold_grid: tuple[float, ...] = (0.4, 0.5, 0.6, 0.7)
     embargo_days: int = 1
     test_frac: float = 0.25
+    # When set, pins the OOS test window to a fixed calendar boundary
+    # instead of a fraction of the corpus, so a growing corpus keeps a
+    # comparable test set run over run. ISO "yyyy-mm-dd"; None preserves
+    # the fraction-based split exactly.
+    test_start_date: str | None = None
     max_rows_per_day: int = 2000
     clip_shares: int = 1000
     seed: int = 7
@@ -121,11 +126,26 @@ def build_dataset(day_files: list[Path], cfg: TrainConfig,
 
 
 def split_days(dates: list[str], cfg: TrainConfig) -> tuple[list[str], list[str]]:
-    """Strictly temporal day split with an embargo dropped from the train side."""
+    """Strictly temporal day split with an embargo dropped from the train side.
+
+    If cfg.test_start_date is set, the OOS boundary is pinned to that ISO
+    date (string comparison on sorted unique days) instead of a fraction of
+    the corpus: test = all days >= test_start_date, train = days strictly
+    before it. This keeps the test window comparable as the corpus grows.
+    None reproduces the fraction-based split exactly.
+    """
     uniq = sorted(set(dates))
-    n_test = max(1, math.ceil(len(uniq) * cfg.test_frac))
-    test = uniq[-n_test:]
-    train = uniq[:-n_test]
+    if cfg.test_start_date is not None:
+        test = [d for d in uniq if d >= cfg.test_start_date]
+        train = [d for d in uniq if d < cfg.test_start_date]
+        if not test:
+            raise ValueError(
+                f"test_start_date={cfg.test_start_date!r} leaves no test days "
+                f"(latest day in corpus is {uniq[-1] if uniq else 'n/a'})")
+    else:
+        n_test = max(1, math.ceil(len(uniq) * cfg.test_frac))
+        test = uniq[-n_test:]
+        train = uniq[:-n_test]
     first_test = pd.Timestamp(test[0])
     train = [d for d in train
              if (first_test - pd.Timestamp(d)).days > cfg.embargo_days]

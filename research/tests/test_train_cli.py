@@ -7,7 +7,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import pytest
-from scalp.walkforward import TrainConfig, fit_model, split_val_days
+from scalp.walkforward import TrainConfig, fit_model, split_days, split_val_days
 from scripts.sim_eval import day_entries
 from scripts.train_scalper import drop_columns, parse_drop_features
 
@@ -85,6 +85,44 @@ def test_drop_columns_errors_on_unknown_name():
     df = pd.DataFrame({"a": [1, 2], "b": [3, 4]})
     with pytest.raises(ValueError, match="unknown column"):
         drop_columns(df, ["nope"])
+
+
+# --------------------------------------------------------------------------
+# --test-start-date pinned OOS window
+# --------------------------------------------------------------------------
+
+def test_split_days_test_start_date_respects_boundary_and_embargo():
+    dates = [f"2024-06-{d:02d}" for d in range(1, 21)]  # 20 unique days
+    cfg = TrainConfig(test_start_date="2024-06-15", embargo_days=1)
+    train, test = split_days(dates, cfg)
+    # every test day is on/after the pinned boundary
+    assert min(test) == "2024-06-15"
+    assert all(d >= "2024-06-15" for d in test)
+    # no train day reaches the boundary
+    assert all(d < "2024-06-15" for d in train)
+    # the embargo day immediately before the boundary is dropped from train
+    assert "2024-06-14" not in train
+    assert "2024-06-13" in train
+
+
+def test_split_days_none_preserves_old_fraction_split():
+    dates = [f"2024-06-{d:02d}" for d in range(1, 21)]  # 20 unique days
+    cfg_old = TrainConfig(test_frac=0.25, embargo_days=1)
+    cfg_new = TrainConfig(test_frac=0.25, embargo_days=1, test_start_date=None)
+    assert split_days(dates, cfg_old) == split_days(dates, cfg_new)
+    # sanity: byte-for-byte the same trailing-fraction behavior as today
+    uniq = sorted(set(dates))
+    n_test = max(1, -(-len(uniq) * 25 // 100))  # ceil via integer math
+    expected_test = uniq[-n_test:]
+    train, test = split_days(dates, cfg_new)
+    assert test == expected_test
+
+
+def test_split_days_test_start_date_empty_test_raises():
+    dates = [f"2024-06-{d:02d}" for d in range(1, 6)]
+    cfg = TrainConfig(test_start_date="2099-01-01")
+    with pytest.raises(ValueError, match="leaves no test days"):
+        split_days(dates, cfg)
 
 
 # --------------------------------------------------------------------------

@@ -102,7 +102,9 @@ class Engine:
         # second-cadence scalp path: builder always exists; the model is wired
         # by cli when scalp_artifact_dir is configured (duck-typed: needs
         # .threshold and .compute_second(symbol, frame) -> ScalpDecision|None)
-        self.second_bars = SecondBarBuilder()
+        # full-RTH window: features like vwap_dist/sess_hi_dist are
+        # session-cumulative — truncating the frame would be train/serve skew
+        self.second_bars = SecondBarBuilder(window_s=23400)
         self.scalp_signal: Any | None = None
         # SCALP_PROFILE=auto: cli sets this; day roll re-picks the guardrail
         # preset from actual equity so account growth upgrades the band

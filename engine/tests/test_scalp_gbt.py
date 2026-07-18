@@ -48,10 +48,11 @@ def synth_frame(n: int = 400) -> pd.DataFrame:
     }, index=idx)
 
 
-def test_feature_order_matches_research(artifact):
-    # the artifact's column order must be exactly what build_features emits —
-    # any drift silently permutes model inputs
-    assert list(build_features(synth_frame()).columns) == FEATURES
+def test_artifact_features_exist_in_research(artifact):
+    # every artifact feature must exist in build_features output — a missing
+    # one would silently reindex to NaN at inference. build_features may grow
+    # NEW columns (newer artifacts pick them up); it must never lose one.
+    assert set(FEATURES) <= set(build_features(synth_frame()).columns)
 
 
 def test_decision_on_warm_frame(artifact):

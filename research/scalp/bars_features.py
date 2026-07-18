@@ -125,6 +125,35 @@ def build_features(
     out["spread_bps"] = bars["spread"] / mid * 1e4
 
     # ------------------------------------------------------------------
+    # Book-pressure microstructure (all causal: rolling/shift/cummax only)
+    # ------------------------------------------------------------------
+    # displayed-size imbalance: bid-heavy book -> buyers stacking up
+    denom = bars["bid_size"] + bars["ask_size"]
+    with np.errstate(invalid="ignore", divide="ignore"):
+        qimb = (bars["bid_size"] - bars["ask_size"]) / denom.replace(0, np.nan)
+    out["qimb"] = qimb
+    out["qimb_chg_30s"] = qimb - qimb.shift(30)
+    # spread regime: current spread vs its trailing norm (narrowing = urgency)
+    spread_med = out["spread_bps"].rolling(300, min_periods=30).median()
+    with np.errstate(invalid="ignore", divide="ignore"):
+        out["spread_rel"] = out["spread_bps"] / spread_med.replace(0, np.nan) - 1.0
+    # bid-side momentum: the BID moving up is real buyer pressure, not prints
+    out["bid_ret_15s"] = bars["bid"].pct_change(periods=15)
+    # breakout proximity: distance below the running session high
+    out["sess_hi_dist"] = px / px.cummax() - 1.0
+    # momentum persistence: consecutive up-seconds (capped at 30)
+    up = (px.diff() > 0).astype(float)
+    grp = (up == 0).cumsum()
+    out["up_streak"] = up.groupby(grp).cumsum().clip(upper=30)
+    # large-print detector: recent mean trade size vs trailing norm
+    with np.errstate(invalid="ignore", divide="ignore"):
+        tsize = (bars["volume"].rolling(60, min_periods=1).sum()
+                 / bars["n_trades"].rolling(60, min_periods=1).sum()
+                 .replace(0, np.nan))
+        out["tsize_surge"] = tsize / tsize.rolling(300, min_periods=30) \
+            .median().replace(0, np.nan)
+
+    # ------------------------------------------------------------------
     # Quote validity flag
     # ------------------------------------------------------------------
     out["quote_ok"] = np.where(

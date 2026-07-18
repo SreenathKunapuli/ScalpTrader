@@ -210,6 +210,38 @@ corpus quality tier matters, and the original high-priority days better
 proxy what the live scanner selects; headline PnL/day figures should be
 read against day quality.
 
+## Recency-filtered training — round 3 (2026-07-18): no deploy
+
+Hypothesis from round 2: dropping the 2020–21 vintage recovers the edge.
+New flags (commit 9a09221): `--train-start-date` (recency-filter train
+days only) and `--val-start-date` (pin the val window so every candidate
+is judged on IDENTICAL val days — fixes a soft spot in round 1's setup).
+Three cutoffs, all judged on the same 138 val days (2025-01-03..
+2025-06-24), thr-0.6 val sum PnL @1000sh:
+
+| train cutoff | core-train days | val PnL | artifact |
+|---|---|---|---|
+| 2022-01-01 | 423 | **+$6,076** (selected) | runs/scalper/20260718_084947 |
+| 2023-01-01 | 329 | −$1,816 | runs/scalper/20260718_091129 |
+| 2024-01-01 | ~230 | −$15,460 | runs/scalper/20260718_092320 |
+
+One-time OOS test read of the winner (full 561-day 2022+ train fit,
+pinned window, 361 test days): thr 0.6 hit 14.7%, expectancy −0.92¢/sh,
+**sum PnL @1000sh −$41,229**; thr 0.7 +$2,031
+(runs/scalper/20260718_112851). That is worse than round 2's unfiltered
+887-day model (−$29,463) on the same window. Sim gate not run: it is a
+pre-deploy gate, and no deploy is possible — round 2's model, $12k
+better on this same test read, managed only +$30.8k matched-day maker
+vs the deployed +$65.6k bar. Verdict: FAILED, deployed artifact
+unchanged.
+
+Cross-round lesson (rounds 1 and 3): val-window gains have twice failed
+to transfer to the 2025-H2..2026 test window — the 2025-H1 val period is
+a weak proxy for the current regime. Treat small val edges as noise;
+next levers are corpus quality-tier curation (train on top-priority
+manifest days only — the deployed 451-day model is exactly that),
+probability calibration, and the TCN deep rung.
+
 ## Scanner ranker (which stocks to watch)
 
 8 morning-observable features (gap, prev-day liquidity, first-15-min tape;

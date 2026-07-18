@@ -34,6 +34,7 @@ from scalp.sim import SimConfig, simulate  # noqa: E402
 from scalp.triple_barrier import label_scalps  # noqa: E402
 from scalp.walkforward import TrainConfig, barrier_arrays, build_dataset, \
     fit_model, split_days  # noqa: E402
+from scripts.train_scalper import drop_columns, parse_drop_features  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 MANIFEST = ROOT / "data" / "corpus" / "manifest.csv"
@@ -42,7 +43,9 @@ CORPUS_DIR = ROOT / "data" / "corpus" / "1s"
 
 def day_entries(bars: pd.DataFrame, model, cfg: TrainConfig,
                 threshold: float, qty: int,
-                exec_stop_mult: float = 1.0) -> tuple[pd.DataFrame, pd.DataFrame]:
+                exec_stop_mult: float = 1.0,
+                drop_feats: list[str] | None = None,
+                ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Entry decisions for one stock-day + their barrier-assumption edges.
 
     Gating mirrors the live engine: barriers warm (finite), NBBO valid at
@@ -50,6 +53,7 @@ def day_entries(bars: pd.DataFrame, model, cfg: TrainConfig,
     sim.simulate, label-edge frame aligned to the same index).
     """
     feats = build_features(bars)
+    feats = drop_columns(feats, drop_feats or [])
     tgt, stp = barrier_arrays(bars, cfg)
     ask = bars["ask"].to_numpy(dtype=float)
     bid = bars["bid"].to_numpy(dtype=float)
@@ -105,6 +109,13 @@ def main() -> None:
     p.add_argument("--maker-wait", type=int, default=30)
     p.add_argument("--limit", type=int, default=0, help="cap #stock-days")
     p.add_argument("--out", default="runs/sim_eval")
+    p.add_argument("--learning-rate", type=float, default=None)
+    p.add_argument("--max-iter", type=int, default=None)
+    p.add_argument("--max-leaf-nodes", type=int, default=None)
+    p.add_argument("--min-samples-leaf", type=int, default=None)
+    p.add_argument("--l2-regularization", type=float, default=None)
+    p.add_argument("--drop-features", default=None,
+                   help="comma-separated feature columns to drop, e.g. 'a,b,c'")
     args = p.parse_args()
 
     cfg = TrainConfig(target_ps=args.target_ps, stop_ps=args.stop_ps,
@@ -112,6 +123,11 @@ def main() -> None:
                       vol_target_mult=args.vol_target_mult,
                       vol_stop_mult=args.vol_stop_mult,
                       vol_window_s=args.vol_window)
+    drop_feats = parse_drop_features(args.drop_features)
+    hp = dict(learning_rate=args.learning_rate, max_iter=args.max_iter,
+             max_leaf_nodes=args.max_leaf_nodes,
+             min_samples_leaf=args.min_samples_leaf,
+             l2_regularization=args.l2_regularization)
     man = pd.read_csv(MANIFEST)
     ok = man[man["status"] == "ok"]
     files = [CORPUS_DIR / f"{r.symbol}_{r.date}.parquet"
@@ -128,7 +144,8 @@ def main() -> None:
 
     print("fitting model on train days ...", flush=True)
     x_tr, y_tr, _ = build_dataset(train_files, cfg)
-    model = fit_model(x_tr, y_tr, cfg.seed)
+    x_tr = drop_columns(x_tr, drop_feats)
+    model = fit_model(x_tr, y_tr, cfg.seed, **hp)
 
     modes = {
         "taker": SimConfig(entry_mode="taker", fees=cfg.fees,
@@ -143,7 +160,7 @@ def main() -> None:
     for i, f in enumerate(sorted(test_files)):
         bars = pd.read_parquet(f)
         entries, lab = day_entries(bars, model, cfg, args.threshold, args.qty,
-                                   args.exec_stop_mult)
+                                   args.exec_stop_mult, drop_feats)
         if entries.empty:
             continue
         n_attempted += len(entries)

@@ -23,6 +23,7 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scalp.viability import FeeModel  # noqa: E402
 from scalp.walkforward import TrainConfig, build_dataset, fit_model  # noqa: E402
+from scripts.train_scalper import drop_columns, parse_drop_features  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 MANIFEST = ROOT / "data" / "corpus" / "manifest.csv"
@@ -39,7 +40,19 @@ def main() -> None:
                    help="execution stop = label stop x this. Default 1000 "
                         "(timeout-only exits; sim study showed nearby stops "
                         "pay ruinous gap-through slippage)")
+    p.add_argument("--learning-rate", type=float, default=None)
+    p.add_argument("--max-iter", type=int, default=None)
+    p.add_argument("--max-leaf-nodes", type=int, default=None)
+    p.add_argument("--min-samples-leaf", type=int, default=None)
+    p.add_argument("--l2-regularization", type=float, default=None)
+    p.add_argument("--drop-features", default=None,
+                   help="comma-separated feature columns to drop, e.g. 'a,b,c'")
     args = p.parse_args()
+    drop_feats = parse_drop_features(args.drop_features)
+    hp = dict(learning_rate=args.learning_rate, max_iter=args.max_iter,
+             max_leaf_nodes=args.max_leaf_nodes,
+             min_samples_leaf=args.min_samples_leaf,
+             l2_regularization=args.l2_regularization)
 
     run_dir = (ROOT / args.run_dir).resolve()
     saved = json.loads((run_dir / "config.json").read_text())
@@ -55,7 +68,8 @@ def main() -> None:
     print(f"deployment fit on ALL {len(files)} stock-days "
           f"(config from {run_dir.name}) ...", flush=True)
     x, y, _ = build_dataset(files, cfg)
-    model = fit_model(x, y, cfg.seed)
+    x = drop_columns(x, drop_feats)
+    model = fit_model(x, y, cfg.seed, **hp)
 
     import joblib
     joblib.dump(model, run_dir / "model.joblib")
@@ -81,6 +95,8 @@ def main() -> None:
         "n_stock_days": len(files),
         "n_rows": int(len(x)),
         "git_head": head,
+        "hp": hp,
+        "dropped_features": drop_feats,
     }, indent=2))
     print(f"artifact -> {run_dir}/{{model.joblib, features.json, inference.json}}")
 

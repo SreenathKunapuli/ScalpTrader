@@ -242,6 +242,44 @@ next levers are corpus quality-tier curation (train on top-priority
 manifest days only — the deployed 451-day model is exactly that),
 probability calibration, and the TCN deep rung.
 
+## Quality-depth curation — round 4 (2026-07-18): no deploy, campaign closed
+
+New `--train-quality-limit N` flag (commit 43b2173) restricts the
+training fit to the top-N fetch-priority (quality-ranked) manifest rows;
+val/test days are never filtered. Four depths judged on the identical
+138 val days (2025-01-03..2025-06-24), thr-0.6 val sum PnL @1000sh:
+
+| depth | core-train days | val PnL | artifact |
+|---|---|---|---|
+| top-450 | 274 | −$6,320 | runs/scalper/20260718_120547 |
+| top-600 | 361 | −$4,840 | runs/scalper/20260718_121944 |
+| top-800 | 474 | **+$3,739** (selected) | runs/scalper/20260718_124042 |
+| top-1250 | 749 | −$1,671 | runs/scalper/20260718_130447 |
+
+One-time OOS test read of top-800 (571 train days, pinned 361-day
+window): thr 0.6 hit 15.2%, expectancy −0.94¢/sh, sum PnL −$34,191;
+thr 0.7 −$5,443 (runs/scalper/20260718_132730). Third val→test transfer
+failure — and top-450 (≈ the deployed recipe) scored NEGATIVE on val
+while being the best-known test config: the 2025-H1 val window
+rank-inverts against the 2025-H2..2026 test regime.
+
+Sim gate (runs/sim_eval/20260718_141254): full window taker −$53,902 /
+maker +$37,282; matched 122 days taker −$16,311 (−0.68¢/sh) / maker
++$41,539 (+1.57¢/sh) vs deployed +$12,330 (+0.50¢/sh) / +$65,582
+(+2.37¢/sh). Gate FAILED.
+
+Campaign-closing finding — maker PnL on IDENTICAL matched days is
+monotone in training quality depth: top-451 +$65,582 → top-800
++$41,539 → all-887 +$30,843. Any lower-quality training days dilute the
+edge; the deployed artifact is the measured optimum of the current GBT
++ 19-feature + corpus family.
+
+Four rounds (HP, more data, recency, quality depth) all rejected by the
+protocol — remaining levers are new features, probability calibration
+(low expectation: re-maps scores, adds no information), the TCN deep
+rung on the now-1,250-day corpus, and paper-trading evidence (Phase 5),
+which is the next validation layer regardless.
+
 ## Scanner ranker (which stocks to watch)
 
 8 morning-observable features (gap, prev-day liquidity, first-15-min tape;

@@ -249,21 +249,33 @@ def make_fill_handler(engine: "Engine", om: "OrderManager"):  # type: ignore[no-
     return _on_fill_event
 
 
-def resolve_scalp_profile(profile: str) -> "ScalpConfig | None":
+def resolve_scalp_profile(profile: str,
+                          equity: float | None = None) -> "ScalpConfig | None":
     """Map settings.scalp_profile to its frozen ScalpConfig.
 
     "off" -> None: the engine runs with every scalp/bracket path dormant
-    (legacy behavior). Anything else unrecognized is a config error on the
-    money path — fail loudly rather than silently trading without brackets."""
-    from .config.scalp_tiers import SCALP_LARGE, SCALP_SMALL
+    (legacy behavior). "auto" -> preset chosen from the account's ACTUAL
+    equity (change equity at the broker, restart, and the guardrails
+    follow; re-checked at each day roll). Anything else unrecognized is a
+    config error on the money path — fail loudly rather than silently
+    trading without brackets."""
+    from .config.scalp_tiers import SCALP_LARGE, SCALP_MID, SCALP_SMALL, \
+        profile_for_equity
 
     if profile == "off":
         return None
+    if profile == "auto":
+        if equity is None:
+            raise ValueError("scalp_profile=auto needs the account equity")
+        return profile_for_equity(equity)
     if profile == "small":
         return SCALP_SMALL
+    if profile == "mid":
+        return SCALP_MID
     if profile == "large":
         return SCALP_LARGE
-    raise ValueError(f"unknown scalp_profile {profile!r} (expected off|small|large)")
+    raise ValueError(
+        f"unknown scalp_profile {profile!r} (expected off|auto|small|mid|large)")
 
 
 def rearm_open_scalps(engine: "Engine", scalp_cfg: "ScalpConfig") -> None:
@@ -341,8 +353,20 @@ async def _run(tier_name: str) -> None:
     broker = AlpacaBroker(s.alpaca_api_key, s.alpaca_secret_key, s.alpaca_paper_base_url)
     om = OrderManager(broker, repo, state)
     ensemble = Ensemble([MomentumSignal(), MeanReversionSignal()])
-    scalp_cfg = resolve_scalp_profile(s.scalp_profile)
+    account = await broker.get_account()
+    scalp_cfg = resolve_scalp_profile(s.scalp_profile, equity=account.equity)
+    if s.scalp_profile == "auto":
+        from .config.scalp_tiers import AUTO_FLOOR_BAND_EQUITY, AUTO_FLOOR_USD
+
+        # small accounts get the day-trading equity floor by default; an
+        # explicit MIN_EQUITY_HALT_USD always wins
+        if not s.min_equity_halt_usd and account.equity < AUTO_FLOOR_BAND_EQUITY:
+            s.min_equity_halt_usd = AUTO_FLOOR_USD
+        log.info("scalp.auto_profile", equity=account.equity,
+                 profile=scalp_cfg.name if scalp_cfg else "off",
+                 equity_floor=s.min_equity_halt_usd or None)
     engine = Engine(s, tier, repo, om, ensemble, state, pubsub, scalp_cfg=scalp_cfg)
+    engine.scalp_auto = s.scalp_profile == "auto"
     if scalp_cfg is not None and s.scalp_artifact_dir:
         from .signals.scalp_gbt import ScalpGbtSignal
 

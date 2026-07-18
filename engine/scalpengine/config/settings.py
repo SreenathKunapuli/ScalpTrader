@@ -41,7 +41,7 @@ class Settings(BaseSettings):
 
     # engine
     risk_tier: str = "medium"
-    scalp_profile: str = "off"  # off | small | large
+    scalp_profile: str = "off"  # off | auto | small | mid | large
     # dir holding model.joblib/features.json/inference.json (export_model.py);
     # empty -> bracket paths active but the second-cadence model loop is off
     scalp_artifact_dir: str = ""

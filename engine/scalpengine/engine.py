@@ -104,6 +104,9 @@ class Engine:
         # .threshold and .compute_second(symbol, frame) -> ScalpDecision|None)
         self.second_bars = SecondBarBuilder()
         self.scalp_signal: Any | None = None
+        # SCALP_PROFILE=auto: cli sets this; day roll re-picks the guardrail
+        # preset from actual equity so account growth upgrades the band
+        self.scalp_auto = False
         # quote-staleness instrumentation (Phase 5)
         self.staleness = QuoteStalenessTracker(
             pause_s=float(settings.staleness_pause_s),
@@ -643,6 +646,15 @@ class Engine:
             self.repo.update_state(status="RUNNING", halted_reason="")
             log.info("intraday_halt.cleared")
         self.repo.update_state(day_start_equity=self.state.equity)
+        if self.scalp_auto and self.scalp_cfg is not None:
+            from .config.scalp_tiers import profile_for_equity
+
+            new_cfg = profile_for_equity(self.state.equity)
+            if new_cfg.name != self.scalp_cfg.name:
+                log.info("scalp.auto_profile_changed", old=self.scalp_cfg.name,
+                         new=new_cfg.name, equity=self.state.equity)
+                self.scalp_cfg = new_cfg
+                self.risk.scalp_cfg = new_cfg
         # reset dynamic universe — yesterday's movers don't carry over
         self._live_universe = list(self.tier.universe)
         self.risk.reset_dynamic_universe()

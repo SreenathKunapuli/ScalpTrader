@@ -42,9 +42,35 @@ SCALP_SMALL = ScalpConfig(
     "small", 0.9, 0.9, 1, 0.05, 0.03, 0.05, 0.04, 120, 0.05, 0.5, 10.0,
 )
 
+# Mid-size accounts (~$10k-$50k): a few concurrent scalps, moderate position
+# concentration, caps between the small and large presets.
+SCALP_MID = ScalpConfig(
+    "mid", 0.30, 0.60, 3, 0.03, 0.02, 0.05, 0.04, 120, 0.03, 0.5, 10.0,
+)
+
 # ~$100k accounts: up to 5 concurrent scalps, each capped small (10% position),
 # gross capped at 50%. Tighter daily/per-symbol loss caps than the small tier —
 # a larger book can afford a lower relative pain threshold.
 SCALP_LARGE = ScalpConfig(
     "large", 0.10, 0.50, 5, 0.02, 0.01, 0.05, 0.04, 120, 0.02, 0.5, 10.0,
 )
+
+# equity bands for SCALP_PROFILE=auto (see profile_for_equity)
+AUTO_MID_MIN_EQUITY = 10_000.0
+AUTO_LARGE_MIN_EQUITY = 50_000.0
+# below this, auto mode also defaults the day-trading equity floor
+AUTO_FLOOR_BAND_EQUITY = 25_000.0
+AUTO_FLOOR_USD = 2_600.0     # $100 buffer above the $2.5k day-trading minimum
+
+
+def profile_for_equity(equity: float) -> ScalpConfig:
+    """Pick the guardrail preset for an account's actual equity.
+
+    The presets themselves are percentage-based, so sizing scales with
+    equity continuously; the bands only step concurrency and concentration.
+    """
+    if equity >= AUTO_LARGE_MIN_EQUITY:
+        return SCALP_LARGE
+    if equity >= AUTO_MID_MIN_EQUITY:
+        return SCALP_MID
+    return SCALP_SMALL

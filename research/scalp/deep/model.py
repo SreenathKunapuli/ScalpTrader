@@ -30,6 +30,38 @@ def pick_device() -> torch.device:
         else torch.device("cpu")
 
 
+def _assert_single_day_contiguous_index(idx: pd.Index) -> None:
+    """windows_for_all_seconds builds causal windows over ROW POSITION and
+    the warmup mask only zeroes the first window_s-1 ROWS of whatever frame
+    it's given — both are only correct if `idx` is a single stock-day's
+    contiguous 1-second series (the day_entries-style full-day frame).
+
+    Fed a multi-day/multi-symbol concatenation instead (e.g.
+    scalp.walkforward.build_dataset's x_test — a valid-row subset, per-day
+    stratified-subsampled, multi-stock-day concat sorted lexically by
+    file), windows would silently splice rows from OTHER stock-days into
+    each window and the warmup mask would only cover the very first window
+    of the whole concatenation. Fail loudly instead of scoring garbage.
+    """
+    if len(idx) < 2:
+        return
+    if not isinstance(idx, pd.DatetimeIndex):
+        raise ValueError(
+            "TcnProbModel.predict_proba: feats_df.index must be a "
+            f"DatetimeIndex, got {type(idx).__name__}")
+    diffs = idx.to_series().diff().dropna()
+    if not (diffs == pd.Timedelta(seconds=1)).all():
+        raise ValueError(
+            "TcnProbModel.predict_proba: feats_df.index must be a "
+            "monotonic, contiguous 1-second DatetimeIndex spanning a "
+            "SINGLE stock-day (the day_entries-style full-day feature "
+            "frame) — got gaps or out-of-order timestamps, which usually "
+            "means a multi-day/multi-symbol concatenation (e.g. "
+            "scalp.walkforward.build_dataset's x_test) was passed in; see "
+            "the TcnProbModel docstring for why that silently corrupts "
+            "windows instead of erroring")
+
+
 # --------------------------------------------------------------------------- #
 # Causal TCN block (port of LOB's _CausalConv1d / _TCNBlock)
 # --------------------------------------------------------------------------- #
@@ -105,16 +137,24 @@ class ScalpTCN(nn.Module):
 # --------------------------------------------------------------------------- #
 class TcnProbModel:
     """Fit-nothing predict_proba(feats_df) -> np.ndarray [n, 2], matching
-    the sklearn interface scalp.walkforward.evaluate / scripts.sim_eval's
-    day_entries already use for the GBT rung — so a TCN artifact can be
-    swapped in for `model` in those call sites unchanged.
+    the sklearn predict_proba SHAPE the GBT rung's scripts.sim_eval
+    day_entries call site expects — but NOT a drop-in for
+    scalp.walkforward.evaluate: that function's x_test is a valid-row
+    subset, per-day stratified-subsampled, multi-stock-day concatenation
+    (sorted lexically by file), and this class builds windows over ROW
+    POSITION, not timestamp — see predict_proba's index guard. The TCN
+    must be evaluated per stock-day through a day_entries-style FULL-day
+    feature frame, one stock-day at a time, never through evaluate's
+    concatenated x_test.
 
     `feats_df` must be the FULL day feature frame as build_features
     returns it (same columns, same index) — NOT a subset of warm rows.
     Builds a causal window ending at every second internally, applies the
     stored (train-days-only) scaler, batches through the net, and returns
     p=0 at "warmup" seconds: either fewer than window_s-1 seconds of prior
-    history (heavily NaN-padded windows the net never trained on) or a NaN
+    history (heavily NaN-padded windows the net never trained on — see
+    scalp.deep.dataset.build_windows, which excludes exactly this
+    population from training so this guarantee actually holds) or a NaN
     in that second's own feature row (an intrinsically undefined second,
     e.g. before any quote/trade has established the rolling stats). This
     mirrors the conservative "abstain" behavior the barrier/NBBO gate in
@@ -154,6 +194,7 @@ class TcnProbModel:
 
     @torch.no_grad()
     def predict_proba(self, feats_df: pd.DataFrame) -> np.ndarray:
+        _assert_single_day_contiguous_index(feats_df.index)
         feature_names = self.scaler["feature_names"]
         missing = [c for c in feature_names if c not in feats_df.columns]
         if missing:

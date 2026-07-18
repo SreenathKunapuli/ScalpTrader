@@ -3,13 +3,21 @@
 Every sample is a strictly-causal window of the SAME per-second features
 the GBT rung and the live engine use (scalp.bars_features.build_features —
 this module never reimplements a feature). A sample exists at second t iff
-the triple-barrier label is warm there, reusing scalp.walkforward and
-scalp.triple_barrier exactly as scalp.walkforward.build_dataset does, so
-the TCN sees precisely the same candidate set the GBT rung was scored on.
+the triple-barrier label is warm there (reusing scalp.walkforward and
+scalp.triple_barrier exactly as scalp.walkforward.build_dataset does) AND
+t is in the population served at inference time — t >= window_s-1 and
+feats.iloc[t] is NaN-free. That second condition matters: label validity
+alone would admit day-start pad windows and NaN feature rows that
+TcnProbModel.predict_proba (model.py) hard-zeroes at serve time, so
+train/val would be fit and early-stopped on a population inference never
+scores. build_windows enforces both so the sample population matches
+serving exactly.
 
 Causality: the window at t is features rows [t-window_s+1 .. t] — PAST rows
-only. Days that start with fewer than window_s-1 seconds of history before
-t are left-padded with NaN (never wrapped, never filled from the future).
+only. windows_for_all_seconds (serving) left-pads days that start with
+fewer than window_s-1 seconds of history with NaN (never wrapped, never
+filled from the future); build_windows (training) excludes those padded
+seconds outright rather than training on them, per the parity note above.
 
 Nothing in here normalizes: build_windows returns raw feature values so the
 scaler fit (TRAIN DAYS ONLY) can never leak through a pre-normalized window.
@@ -83,7 +91,14 @@ def build_windows(
 
     A sample exists at second t iff the triple-barrier label is warm there
     (barrier_arrays + label_scalps, identical to walkforward.build_dataset's
-    validity gate). No normalization is applied here.
+    validity gate) AND t is in the population TcnProbModel.predict_proba
+    actually scores at serve time: t >= window_s-1 (not a day-start pad
+    window) and feats.iloc[t] has no NaN (not an intrinsically-undefined
+    second). Label validity alone is NOT enough here — the NBBO/barrier
+    gate it checks is independent of the two serve-time exclusions above,
+    so without intersecting them the train/val sample population would
+    include seconds (notably the first window_s-1 of every day) serving
+    never emits a probability for. No normalization is applied here.
     """
     feats = build_features(bars)
     n = len(feats)
@@ -98,7 +113,14 @@ def build_windows(
 
     tgt, stp = barrier_arrays(bars, cfg)
     lab = label_scalps(bars, cfg.barrier(), target_ps_arr=tgt, stop_ps_arr=stp)
-    valid = lab["label"].notna().to_numpy()
+    label_valid = lab["label"].notna().to_numpy()
+    # Same population TcnProbModel.predict_proba's warmup mask keeps
+    # (model.py): not a day-start pad window, and this second's own
+    # feature row is NaN-free.
+    servable = (
+        (np.arange(n) >= window_s - 1) & feats.notna().all(axis=1).to_numpy()
+    )
+    valid = label_valid & servable
     if not valid.any():
         return empty
 

@@ -99,14 +99,30 @@ def test_windows_for_all_seconds_pads_and_never_reads_future_rows():
         np.testing.assert_array_equal(real, expected)
 
 
-def test_build_windows_matches_manual_reference_and_pads_at_day_start():
+def test_build_windows_matches_manual_reference_and_excludes_day_start_pad():
+    """build_windows' sample population is label-valid AND servable (see
+    _servable_mask below, mirroring TcnProbModel.predict_proba's warmup
+    mask) — this reproduces that population by hand and checks build_windows
+    matches it exactly, INCLUDING excluding day-start pad seconds even
+    though some of them are label-valid on their own."""
     cfg = _cfg()
-    bars = make_frame(n=300)
+    # NB: needs n well past 300 -- ret_300s (a feature) is NaN for every
+    # row before row 300 regardless of window_s, so a short frame would
+    # leave the servable population empty and make this test vacuous.
+    bars = make_frame(n=N)
     feats = build_features(bars)
+    n = len(feats)
     tgt, stp = barrier_arrays(bars, cfg)
     lab = label_scalps(bars, cfg.barrier(), target_ps_arr=tgt, stop_ps_arr=stp)
-    valid = lab["label"].notna().to_numpy()
+    label_valid = lab["label"].notna().to_numpy()
+    servable = (
+        (np.arange(n) >= WINDOW - 1) & feats.notna().all(axis=1).to_numpy()
+    )
+    valid = label_valid & servable
     assert valid.sum() > 5   # battery isn't vacuous
+    # the bug this guards: label validity alone DOES include day-start
+    # seconds (t < WINDOW-1) that a servable-only gate would exclude
+    assert label_valid[: WINDOW - 1].any()
 
     X, y, idx = build_windows(bars, cfg, window_s=WINDOW)
     assert X.shape == (int(valid.sum()), feats.shape[1], WINDOW)
@@ -118,13 +134,45 @@ def test_build_windows_matches_manual_reference_and_pads_at_day_start():
     np.testing.assert_array_equal(idx, bars.index[valid])
 
     valid_pos = np.nonzero(valid)[0]
-    assert valid_pos[0] < WINDOW - 1   # exercises the day-start pad path
+    # train/serve parity: build_windows must never admit a day-start pad
+    # second, even though such seconds can be label-valid on their own
+    assert valid_pos[0] >= WINDOW - 1
     for i, t in enumerate(valid_pos):
-        n_pad = max(0, WINDOW - 1 - t)
-        if n_pad:
-            assert np.isnan(X[i][:, :n_pad]).all()
         np.testing.assert_array_equal(
             X[i][:, -1], feats.iloc[t].to_numpy(dtype=np.float32))
+
+
+# --------------------------------------------------------------------------- #
+# (b2) regression: build_windows' sample population must equal exactly what
+# TcnProbModel.predict_proba serves a probability for (train/serve parity)
+# --------------------------------------------------------------------------- #
+def test_build_windows_never_admits_seconds_predict_proba_would_abstain_on():
+    """Before the fix, build_windows gated on label validity alone, which
+    can include day-start pad seconds (t < window_s-1) and seconds whose
+    own feature row is NaN — exactly the seconds TcnProbModel.predict_proba
+    (model.py) hard-zeroes at serve time. That trained/early-stopped on a
+    population inference never scores. This asserts the two populations
+    now agree."""
+    cfg = _cfg()
+    bars = make_frame(n=N)   # see note above: needs n past 300 (ret_300s)
+    feats = build_features(bars)
+
+    X, y, idx = build_windows(bars, cfg, window_s=WINDOW)
+    assert len(idx) > 5   # battery isn't vacuous
+
+    day_start_ts = bars.index[: WINDOW - 1]
+    assert not idx.isin(day_start_ts).any()
+
+    nan_ts = feats.index[feats.isna().any(axis=1)]
+    assert not idx.isin(nan_ts).any()
+
+    # sanity: the bug this guards against is real -- label validity alone
+    # (the pre-fix gate) DOES include some of these serve-abstained seconds
+    tgt, stp = barrier_arrays(bars, cfg)
+    lab = label_scalps(bars, cfg.barrier(), target_ps_arr=tgt, stop_ps_arr=stp)
+    label_valid_ts = bars.index[lab["label"].notna().to_numpy()]
+    assert (label_valid_ts.isin(day_start_ts).any()
+            or label_valid_ts.isin(nan_ts).any())
 
 
 # --------------------------------------------------------------------------- #
@@ -253,9 +301,10 @@ def test_tcn_prob_model_predict_proba_shape_and_warmup_zero():
     from scalp.deep.model import ScalpTCN, TcnProbModel
 
     n, n_feat, window_s = 50, 4, 10
+    idx = pd.date_range("2025-01-06 09:30:00", periods=n, freq="1s", tz="UTC")
     feats = pd.DataFrame(
         np.random.default_rng(0).normal(size=(n, n_feat)),
-        columns=[f"f{i}" for i in range(n_feat)],
+        columns=[f"f{i}" for i in range(n_feat)], index=idx,
     )
     feats.iloc[20] = np.nan   # an intrinsically undefined (NaN) second
 
@@ -276,6 +325,49 @@ def test_tcn_prob_model_predict_proba_shape_and_warmup_zero():
     # day-start warmup (t < window_s-1) and the injected NaN row -> p=0
     assert (proba[: window_s - 1, 1] == 0.0).all()
     assert proba[20, 1] == 0.0
+
+
+# --------------------------------------------------------------------------- #
+# regression: predict_proba must reject a non-contiguous / multi-day index
+# --------------------------------------------------------------------------- #
+def test_tcn_prob_model_predict_proba_rejects_multi_day_concatenation():
+    """windows_for_all_seconds builds causal windows over ROW POSITION and
+    the warmup mask only zeroes the first window_s-1 ROWS of whatever frame
+    it's given. Fed a multi-day/multi-symbol concatenation (the shape
+    scalp.walkforward.build_dataset's x_test has), it would silently splice
+    rows from OTHER stock-days into a window instead of erroring. This
+    reproduces that shape (two single-day blocks with a multi-month gap
+    between them, same as concatenating two different stock-days'
+    valid-row frames) and checks predict_proba now fails loudly instead."""
+    torch = pytest.importorskip("torch")
+    from scalp.deep.model import ScalpTCN, TcnProbModel
+
+    n_feat, window_s = 4, 10
+    scaler = {
+        "feature_names": [f"f{i}" for i in range(n_feat)],
+        "median": [0.0] * n_feat, "iqr": [1.0] * n_feat,
+        "window_s": window_s, "n_train_files": 1,
+    }
+    model = ScalpTCN(n_features=n_feat, window_s=window_s, channels=4,
+                     blocks=1, dropout=0.0)
+    wrapped = TcnProbModel(model, scaler, window_s=window_s,
+                           device=torch.device("cpu"))
+
+    day1 = pd.date_range("2024-01-02 09:30:00", periods=20, freq="1s", tz="UTC")
+    day2 = pd.date_range("2024-06-03 09:30:00", periods=20, freq="1s", tz="UTC")
+    idx = day1.append(day2)
+    feats = pd.DataFrame(
+        np.random.default_rng(0).normal(size=(len(idx), n_feat)),
+        columns=scaler["feature_names"], index=idx,
+    )
+
+    with pytest.raises(ValueError, match="contiguous"):
+        wrapped.predict_proba(feats)
+
+    # sanity: the guard isn't rejecting everything -- a genuine single-day
+    # contiguous slice is accepted
+    proba = wrapped.predict_proba(feats.loc[day1])
+    assert proba.shape == (len(day1), 2)
 
 
 if __name__ == "__main__":

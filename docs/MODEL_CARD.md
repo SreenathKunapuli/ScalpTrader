@@ -124,6 +124,56 @@ config's edge before it is trusted live.**
 Engine alignment: `inference.json exec_stop_mult` (export_model.py,
 default 1000) — sizing still prices its Kelly loss leg off the label stop.
 
+## Hyperparameter search — round 1 (2026-07-18): no deploy
+
+**Design.** Staged HP search on the pinned 451-day corpus. Selection used
+ONLY inner temporal validation (`--val-frac 0.2`: 256 core-train days
+≤2024-11-25, 72 val days 2024-12-02..2025-06-20); OOS test was untouched
+during search.
+
+| config | val thr-0.6 PnL @1000sh | note |
+|---|---|---|
+| default HP (baseline) | +$10,417 | reference |
+| `--max-leaf-nodes 31` | — | worse |
+| `--max-leaf-nodes 63` | **+$12,674 (+22%)** | **selected** |
+| `--max-leaf-nodes 127` | +$1,665 | overfits |
+| learning-rate / max-iter variants | all lower | rejected |
+| permutation-guided feature drops | all lower | rejected |
+
+Artifacts: `runs/hpsearch/{baseline,s1_leaf31,s1_leaf63,s1_leaf127,s2_lr05_it300,s2_lr1_it150,s3_bestdrop,s3_basedrop}/`.
+
+**One-time OOS test read — leaf-63 winner** (full 328-day train fit, same
+122 OOS days 2025-06-27..2026-07-14, `runs/scalper/20260718_062534`):
+
+| | thr 0.6 |
+|---|---|
+| n_trades | 1797 (18.0/day) |
+| hit_rate | 18.1% |
+| expectancy | +1.04¢/sh |
+| sum PnL @1000sh | +$18,669 |
+| deployed default-HP model (same days) | **+$27,127** |
+
+Leaf-63 trails the deployed model by $8,458 on the test set.
+
+**Sim gate** (thr 0.6, exec-stop-mult 1000, `--limit 451`):
+
+| model | taker @1000sh | maker @1000sh | artifact |
+|---|---|---|---|
+| leaf-63 | −$25,491 | +$19,718 | runs/sim_eval/20260718_064444 |
+| deployed (default HP) | +$12,330 | +$65,582 | runs/sim_eval/20260718_021932 |
+
+Gate requires beating the deployed model on maker with a non-negative taker
+→ **FAILED**. Deployed artifact `runs/scalper/20260718_015432` unchanged.
+
+**Diagnostic.** Leaf-63 attempted 42,327 sim entries at thr 0.6 vs the
+deployed model's 38,193 — HP changes shift probability calibration so a
+fixed threshold selects very different entry sets across configs; this
+motivates adding a calibration lever before the next HP round.
+
+**Conclusion.** Inner-val gains did not transfer to test or sim — exactly
+the failure mode the round protocol (val-only selection, one test read,
+mandatory sim gate) exists to catch.
+
 ## Scanner ranker (which stocks to watch)
 
 8 morning-observable features (gap, prev-day liquidity, first-15-min tape;

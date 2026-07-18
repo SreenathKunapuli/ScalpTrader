@@ -132,13 +132,45 @@ def split_days(dates: list[str], cfg: TrainConfig) -> tuple[list[str], list[str]
     return train, test
 
 
-def fit_model(x: pd.DataFrame, y: pd.Series, seed: int):
+def fit_model(x: pd.DataFrame, y: pd.Series, seed: int, *,
+             learning_rate: float | None = None,
+             max_iter: int | None = None,
+             max_leaf_nodes: int | None = None,
+             min_samples_leaf: int | None = None,
+             l2_regularization: float | None = None):
+    """Fit the GBT rung. Any hyperparameter left as None falls back to the
+    sklearn default, so omitting all of them reproduces prior behavior
+    exactly."""
     from sklearn.ensemble import HistGradientBoostingClassifier
     freq = y.value_counts(normalize=True)
     w = y.map(lambda v: 1.0 / (len(freq) * freq[v])).to_numpy()
-    model = HistGradientBoostingClassifier(random_state=seed)
+    hp = {
+        "learning_rate": learning_rate,
+        "max_iter": max_iter,
+        "max_leaf_nodes": max_leaf_nodes,
+        "min_samples_leaf": min_samples_leaf,
+        "l2_regularization": l2_regularization,
+    }
+    hp = {k: v for k, v in hp.items() if v is not None}
+    model = HistGradientBoostingClassifier(random_state=seed, **hp)
     model.fit(x, y, sample_weight=w)
     return model
+
+
+def split_val_days(train_dates: list[str], val_frac: float,
+                   ) -> tuple[list[str], list[str]]:
+    """Carve the LAST val_frac fraction of TRAIN days off as an inner
+    validation set, strictly temporal (no embargo — this is an inner split
+    of the train block, not the train/test boundary). val_frac<=0 returns
+    all dates as core-train and an empty val set."""
+    uniq = sorted(set(train_dates))
+    if val_frac <= 0 or len(uniq) < 2:
+        return uniq, []
+    n_val = max(1, math.ceil(len(uniq) * val_frac))
+    n_val = min(n_val, len(uniq) - 1)  # keep >=1 core-train day
+    core = uniq[:-n_val]
+    val = uniq[-n_val:]
+    return core, val
 
 
 def _non_overlapping(sel: pd.DataFrame) -> pd.DataFrame:

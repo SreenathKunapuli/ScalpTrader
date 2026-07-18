@@ -24,11 +24,29 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scalp.walkforward import TrainConfig, build_dataset, evaluate, fit_model, \
-    split_days  # noqa: E402
+    split_days, split_val_days  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 MANIFEST = ROOT / "data" / "corpus" / "manifest.csv"
 CORPUS_DIR = ROOT / "data" / "corpus" / "1s"
+
+
+def parse_drop_features(arg: str | None) -> list[str]:
+    """"a, b,,c" -> ["a", "b", "c"]; None/"" -> []."""
+    if not arg:
+        return []
+    return [c.strip() for c in arg.split(",") if c.strip()]
+
+
+def drop_columns(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
+    """Drop `cols` from `df`; raise on any name not present."""
+    if not cols:
+        return df
+    unknown = [c for c in cols if c not in df.columns]
+    if unknown:
+        raise ValueError(f"--drop-features: unknown column(s) {unknown}; "
+                         f"available: {sorted(df.columns)}")
+    return df.drop(columns=cols)
 
 
 def _git_head() -> str:
@@ -51,6 +69,16 @@ def main() -> None:
     p.add_argument("--vol-window", type=int, default=300)
     p.add_argument("--limit", type=int, default=0, help="cap #stock-days")
     p.add_argument("--out", default="runs/scalper")
+    p.add_argument("--learning-rate", type=float, default=None)
+    p.add_argument("--max-iter", type=int, default=None)
+    p.add_argument("--max-leaf-nodes", type=int, default=None)
+    p.add_argument("--min-samples-leaf", type=int, default=None)
+    p.add_argument("--l2-regularization", type=float, default=None)
+    p.add_argument("--drop-features", default=None,
+                   help="comma-separated feature columns to drop, e.g. 'a,b,c'")
+    p.add_argument("--val-frac", type=float, default=0.0,
+                   help="carve this fraction of the LAST train days into an "
+                        "inner validation set, evaluated before the OOS test")
     args = p.parse_args()
 
     cfg = TrainConfig(target_ps=args.target_ps, stop_ps=args.stop_ps,
@@ -58,6 +86,11 @@ def main() -> None:
                       vol_target_mult=args.vol_target_mult,
                       vol_stop_mult=args.vol_stop_mult,
                       vol_window_s=args.vol_window)
+    drop_feats = parse_drop_features(args.drop_features)
+    hp = dict(learning_rate=args.learning_rate, max_iter=args.max_iter,
+             max_leaf_nodes=args.max_leaf_nodes,
+             min_samples_leaf=args.min_samples_leaf,
+             l2_regularization=args.l2_regularization)
     man = pd.read_csv(MANIFEST)
     ok = man[man["status"] == "ok"]
     files = [CORPUS_DIR / f"{r.symbol}_{r.date}.parquet"
@@ -72,24 +105,59 @@ def main() -> None:
           f"(≤{max(train_dates) if train_dates else '-'}) | "
           f"test {len(test_files)} (≥{min(test_dates)})")
 
-    print("building train dataset ...", flush=True)
-    x_tr, y_tr, _ = build_dataset(train_files, cfg)
-    print(f"  {len(x_tr):,} rows; label rates "
-          f"{y_tr.value_counts(normalize=True).round(3).to_dict()}", flush=True)
-    print("building test dataset ...", flush=True)
-    x_te, y_te, m_te = build_dataset(test_files, cfg)
-    print(f"  {len(x_te):,} rows", flush=True)
-
-    model = fit_model(x_tr, y_tr, cfg.seed)
-    summary, per_thr = evaluate(model, x_te, y_te, m_te, cfg)
+    if args.val_frac > 0:
+        core_train_dates, val_dates = split_val_days(train_dates, args.val_frac)
+        core_train_files = [f for f, d in zip(files, dates, strict=True)
+                            if d in core_train_dates]
+        val_files = [f for f, d in zip(files, dates, strict=True) if d in val_dates]
+        print(f"  val-split: core-train {len(core_train_files)} "
+              f"(≤{max(core_train_dates) if core_train_dates else '-'}) | "
+              f"val {len(val_files)} (≥{min(val_dates) if val_dates else '-'})")
+    else:
+        core_train_dates, val_dates = train_dates, []
+        core_train_files, val_files = train_files, []
 
     out = ROOT / args.out / time.strftime("%Y%m%d_%H%M%S")
     out.mkdir(parents=True, exist_ok=True)
+
+    print("building train dataset ...", flush=True)
+    x_tr, y_tr, _ = build_dataset(core_train_files, cfg)
+    x_tr = drop_columns(x_tr, drop_feats)
+    print(f"  {len(x_tr):,} rows; label rates "
+          f"{y_tr.value_counts(normalize=True).round(3).to_dict()}", flush=True)
+
+    model = fit_model(x_tr, y_tr, cfg.seed, **hp)
+
+    if val_files:
+        print("building val dataset ...", flush=True)
+        x_val, y_val, m_val = build_dataset(val_files, cfg)
+        x_val = drop_columns(x_val, drop_feats)
+        print(f"  {len(x_val):,} rows", flush=True)
+        val_summary, val_per_thr = evaluate(model, x_val, y_val, m_val, cfg)
+        (out / "val_metrics.json").write_text(
+            json.dumps(val_summary, indent=2, default=str))
+        val_per_thr.to_csv(out / "val_per_threshold.csv", index=False)
+        print(f"\nVAL REPORT (val days {min(val_dates)} .. {max(val_dates)})")
+        print(val_per_thr.round(4).to_string(index=False))
+
+    print("building test dataset ...", flush=True)
+    x_te, y_te, m_te = build_dataset(test_files, cfg)
+    x_te = drop_columns(x_te, drop_feats)
+    print(f"  {len(x_te):,} rows", flush=True)
+
+    summary, per_thr = evaluate(model, x_te, y_te, m_te, cfg)
+
     (out / "config.json").write_text(json.dumps({
         "cfg": {k: (list(v) if isinstance(v, tuple) else v)
                 for k, v in cfg.__dict__.items() if k != "fees"},
         "fees": cfg.fees.__dict__, "git_head": _git_head(),
         "n_train_days": len(train_files), "n_test_days": len(test_files),
+        "n_core_train_days": len(core_train_files), "n_val_days": len(val_files),
+        "learning_rate": args.learning_rate, "max_iter": args.max_iter,
+        "max_leaf_nodes": args.max_leaf_nodes,
+        "min_samples_leaf": args.min_samples_leaf,
+        "l2_regularization": args.l2_regularization,
+        "drop_features": drop_feats, "val_frac": args.val_frac,
     }, indent=2))
     (out / "metrics.json").write_text(json.dumps(summary, indent=2, default=str))
     per_thr.to_csv(out / "per_threshold.csv", index=False)

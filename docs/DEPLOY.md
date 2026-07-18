@@ -269,3 +269,15 @@ The table below confirms that every key in `.env.example` matches the exact fiel
 | `BROKER_ERROR_KILL_WINDOW_S` | `broker_error_kill_window_s` | |
 | `HEARTBEAT_INTERVAL_S` | `heartbeat_interval_s` | |
 | `MODELS_DIR` | `models_dir` | |
+
+## Schema migrations
+
+`Repo` runs `create_all`, which creates missing tables but never alters
+existing ones. When a release adds a column (e.g. `engine_state.staleness_json`,
+2026-07-17), existing databases need a manual migration:
+
+    -- SQLite (local dev)
+    ALTER TABLE engine_state ADD COLUMN staleness_json JSON;
+    -- Postgres (Neon): same statement via psql
+
+Fresh databases need nothing.

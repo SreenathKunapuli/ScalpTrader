@@ -174,6 +174,42 @@ motivates adding a calibration lever before the next HP round.
 the failure mode the round protocol (val-only selection, one test read,
 mandatory sim gate) exists to catch.
 
+## Big-corpus retrain — round 2 (2026-07-18): no deploy
+
+**Setup.** Corpus grew 451 → 1,250 ok stock-days (`build_runner_corpus
+--fetch 800`; new days are lower fetch-priority and skew 2020–2021). New
+`--test-start-date` flag (commit bd99881) pins the OOS window at 2025-06-27
+so it stays comparable as the corpus grows. Retrain of the deployed recipe
+(default HP, 19 features) on all 887 pre-window days:
+`runs/scalper/20260718_065308`. One-time test read on the expanded window
+(361 test stock-days, 2025-06-27..2026-07-16): thr 0.6 hit 14.3%,
+expectancy −0.65¢/sh, sum PnL @1000sh −$29,463; thr 0.7 +$9,344.
+
+**Sim** (thr 0.6, exec-stop-mult 1000, full manifest):
+`runs/sim_eval/20260718_075345` — full window taker −$68,799 (−0.96¢/sh,
+8,716 fills), maker +$34,510 (+0.45¢/sh, 7,638 fills), 106,229 attempted.
+
+**Matched-day comparison** (same simulator, identical 122 test days = test
+days of the original 451-day corpus; baseline run `runs/sim_eval/20260718_021932`):
+
+| model (training set) | subset | taker PnL | taker ¢/sh | maker PnL | maker ¢/sh |
+|---|---|---|---|---|---|
+| deployed (451-corpus) | matched 122 days | +$12,330.17 | +0.50 | +$65,581.64 | +2.37 |
+| big-corpus (887 days) | matched 122 days | −$20,556.43 | −0.72 | +$30,843.04 | +0.96 |
+| big-corpus (887 days) | 238 new test days | −$48,242.48 | −1.11 | +$3,667.00 | +0.08 |
+
+Only the training data differs on the matched rows → the extra 2020–2021-vintage,
+lower-priority training days actively dilute the edge. Verdict: gate FAILED,
+deployed artifact unchanged.
+
+**Implications.**
+(a) Training-data vintage/regime match matters more than volume — motivates
+a `--train-start-date` recency filter (round 3).
+(b) The 238 lower-fetch-priority test days carry near-zero maker edge —
+corpus quality tier matters, and the original high-priority days better
+proxy what the live scanner selects; headline PnL/day figures should be
+read against day quality.
+
 ## Scanner ranker (which stocks to watch)
 
 8 morning-observable features (gap, prev-day liquidity, first-15-min tape;

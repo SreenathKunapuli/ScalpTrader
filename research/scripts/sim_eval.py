@@ -35,7 +35,7 @@ from scalp.triple_barrier import label_scalps  # noqa: E402
 from scalp.walkforward import TrainConfig, barrier_arrays, build_dataset, \
     fit_model, split_days  # noqa: E402
 from scripts.train_scalper import drop_columns, limit_by_quality, \
-    parse_drop_features  # noqa: E402
+    parse_drop_features, quality_weight_array  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 MANIFEST = ROOT / "data" / "corpus" / "manifest.csv"
@@ -135,6 +135,19 @@ def main() -> None:
                         "fetch-priority / quality-rank order). The test "
                         "file set is NEVER filtered. None (default) "
                         "applies no filter.")
+    p.add_argument("--quality-weight-mult", type=float, default=None,
+                   help="soft quality-curation knob: rows whose source file "
+                        "is among the first --quality-weight-top status=='ok' "
+                        "manifest rows get this sample-weight multiplier "
+                        "(composed with the existing class-balanced "
+                        "weights); all other rows get 1.0. None (default) "
+                        "applies no reweighting. Applied to this script's "
+                        "own train fit so a future gate run trains "
+                        "identically to train_scalper.py.")
+    p.add_argument("--quality-weight-top", type=int, default=451,
+                   help="number of leading status=='ok' manifest rows "
+                        "(fetch-priority / quality-rank order) treated as "
+                        "'top quality' for --quality-weight-mult")
     args = p.parse_args()
 
     cfg = TrainConfig(target_ps=args.target_ps, stop_ps=args.stop_ps,
@@ -171,9 +184,21 @@ def main() -> None:
               f"{len(train_files)} files")
 
     print("fitting model on train days ...", flush=True)
-    x_tr, y_tr, _ = build_dataset(train_files, cfg)
+    x_tr, y_tr, m_tr = build_dataset(train_files, cfg)
     x_tr = drop_columns(x_tr, drop_feats)
-    model = fit_model(x_tr, y_tr, cfg.seed, **hp)
+
+    weight_mult = None
+    if args.quality_weight_mult is not None:
+        top_stems = {f.stem for f in files[:args.quality_weight_top]}
+        weight_mult = quality_weight_array(m_tr, top_stems,
+                                           args.quality_weight_mult)
+        print(f"  quality-weight: top {args.quality_weight_top} manifest "
+              f"rows -> x{args.quality_weight_mult} "
+              f"({int((weight_mult != 1.0).sum())} of {len(weight_mult)} "
+              f"rows)", flush=True)
+
+    model = fit_model(x_tr, y_tr, cfg.seed, sample_weight_mult=weight_mult,
+                      **hp)
 
     modes = {
         "taker": SimConfig(entry_mode="taker", fees=cfg.fees,

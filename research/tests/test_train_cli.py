@@ -12,7 +12,7 @@ from pathlib import Path
 from scalp.walkforward import TrainConfig, fit_model, split_days, split_val_days
 from scripts.sim_eval import day_entries
 from scripts.train_scalper import drop_columns, limit_by_quality, \
-    parse_drop_features
+    parse_drop_features, quality_weight_array
 
 
 def _xy(n: int = 200, seed: int = 0) -> tuple[pd.DataFrame, pd.Series]:
@@ -303,3 +303,58 @@ def test_limit_by_quality_val_test_untouched():
     # lists the caller holds remain the untouched originals
     assert val_files == ranked[8:9]
     assert test_files == ranked[9:10]
+
+
+# --------------------------------------------------------------------------
+# --quality-weight-mult soft quality-curation sample weights
+# --------------------------------------------------------------------------
+
+def test_quality_weight_array_hits_exactly_top_n_stems():
+    """Rows whose (symbol, date) stem is in `top_stems` get `mult`; every
+    other row gets 1.0 — exact membership, no partial credit."""
+    meta = pd.DataFrame({
+        "symbol": ["AAA", "AAA", "BBB", "CCC", "DDD"],
+        "date": ["2024-06-01", "2024-06-01", "2024-06-02",
+                "2024-06-03", "2024-06-04"],
+    })
+    top_stems = {"AAA_2024-06-01", "CCC_2024-06-03"}
+    w = quality_weight_array(meta, top_stems, mult=5.0)
+    np.testing.assert_array_equal(w, np.array([5.0, 5.0, 1.0, 5.0, 1.0]))
+
+
+def test_fit_model_sample_weight_mult_none_is_unchanged_behavior():
+    """Passing sample_weight_mult=None (the default) must reproduce the
+    exact same fitted model as omitting the kwarg entirely."""
+    x, y = _xy()
+    m_default = fit_model(x, y, seed=7)
+    m_explicit_none = fit_model(x, y, seed=7, sample_weight_mult=None)
+    np.testing.assert_array_equal(m_default.predict_proba(x),
+                                  m_explicit_none.predict_proba(x))
+
+
+def test_fit_model_composes_quality_mult_with_class_balance(monkeypatch):
+    """sample_weight_mult must be multiplied elementwise into the existing
+    class-balanced weights, not replace them."""
+    import sklearn.ensemble as ensemble_mod
+
+    captured: dict = {}
+
+    class _RecordingClassifier:
+        def __init__(self, random_state=None, **hp):
+            self.random_state = random_state
+
+        def fit(self, x, y, sample_weight=None):
+            captured["sample_weight"] = sample_weight
+            self.classes_ = np.unique(y)
+            return self
+
+    monkeypatch.setattr(ensemble_mod, "HistGradientBoostingClassifier",
+                        _RecordingClassifier)
+
+    x, y = _xy(n=50)
+    mult = np.where(np.arange(50) < 10, 3.0, 1.0)
+    fit_model(x, y, seed=7, sample_weight_mult=mult)
+
+    freq = y.value_counts(normalize=True)
+    base_w = y.map(lambda v: 1.0 / (len(freq) * freq[v])).to_numpy()
+    np.testing.assert_allclose(captured["sample_weight"], base_w * mult)

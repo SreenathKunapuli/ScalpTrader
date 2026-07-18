@@ -169,13 +169,21 @@ def fit_model(x: pd.DataFrame, y: pd.Series, seed: int, *,
              max_iter: int | None = None,
              max_leaf_nodes: int | None = None,
              min_samples_leaf: int | None = None,
-             l2_regularization: float | None = None):
+             l2_regularization: float | None = None,
+             sample_weight_mult: np.ndarray | None = None):
     """Fit the GBT rung. Any hyperparameter left as None falls back to the
     sklearn default, so omitting all of them reproduces prior behavior
-    exactly."""
+    exactly.
+
+    sample_weight_mult, when given, is an elementwise multiplier (same
+    length as y) applied on top of the existing class-balanced sample
+    weights — a soft quality-curation knob. Default None leaves the
+    class-balanced weights unchanged."""
     from sklearn.ensemble import HistGradientBoostingClassifier
     freq = y.value_counts(normalize=True)
     w = y.map(lambda v: 1.0 / (len(freq) * freq[v])).to_numpy()
+    if sample_weight_mult is not None:
+        w = w * sample_weight_mult
     hp = {
         "learning_rate": learning_rate,
         "max_iter": max_iter,

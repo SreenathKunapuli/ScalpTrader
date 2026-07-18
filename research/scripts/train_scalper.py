@@ -66,6 +66,15 @@ def limit_by_quality(candidates: list[Path], ranked_files: list[Path],
     return [f for f in candidates if f in allowed]
 
 
+def quality_weight_array(meta: pd.DataFrame, top_stems: set[str],
+                         mult: float) -> np.ndarray:
+    """Per-row sample-weight multiplier: `mult` for rows whose source file
+    stem ("{symbol}_{date}") is in `top_stems`, 1.0 for everything else.
+    `meta` is build_dataset's third return (needs "symbol" and "date")."""
+    stems = meta["symbol"].astype(str) + "_" + meta["date"].astype(str)
+    return np.where(stems.isin(top_stems), mult, 1.0)
+
+
 def _git_head() -> str:
     try:
         return subprocess.run(["git", "rev-parse", "--short", "HEAD"],
@@ -120,6 +129,17 @@ def main() -> None:
                         "rows, in fetch-priority / quality-rank order). "
                         "Val and test file sets are NEVER filtered. "
                         "None (default) applies no filter.")
+    p.add_argument("--quality-weight-mult", type=float, default=None,
+                   help="soft quality-curation knob: rows whose source file "
+                        "is among the first --quality-weight-top status=='ok' "
+                        "manifest rows get this sample-weight multiplier "
+                        "(composed with the existing class-balanced "
+                        "weights); all other rows get 1.0. None (default) "
+                        "applies no reweighting.")
+    p.add_argument("--quality-weight-top", type=int, default=451,
+                   help="number of leading status=='ok' manifest rows "
+                        "(fetch-priority / quality-rank order) treated as "
+                        "'top quality' for --quality-weight-mult")
     args = p.parse_args()
 
     cfg = TrainConfig(target_ps=args.target_ps, stop_ps=args.stop_ps,
@@ -172,12 +192,23 @@ def main() -> None:
     out.mkdir(parents=True, exist_ok=True)
 
     print("building train dataset ...", flush=True)
-    x_tr, y_tr, _ = build_dataset(core_train_files, cfg)
+    x_tr, y_tr, m_tr = build_dataset(core_train_files, cfg)
     x_tr = drop_columns(x_tr, drop_feats)
     print(f"  {len(x_tr):,} rows; label rates "
           f"{y_tr.value_counts(normalize=True).round(3).to_dict()}", flush=True)
 
-    model = fit_model(x_tr, y_tr, cfg.seed, **hp)
+    weight_mult = None
+    if args.quality_weight_mult is not None:
+        top_stems = {f.stem for f in files[:args.quality_weight_top]}
+        weight_mult = quality_weight_array(m_tr, top_stems,
+                                           args.quality_weight_mult)
+        print(f"  quality-weight: top {args.quality_weight_top} manifest "
+              f"rows -> x{args.quality_weight_mult} "
+              f"({int((weight_mult != 1.0).sum())} of {len(weight_mult)} "
+              f"rows)", flush=True)
+
+    model = fit_model(x_tr, y_tr, cfg.seed, sample_weight_mult=weight_mult,
+                      **hp)
 
     if val_files:
         print("building val dataset ...", flush=True)
@@ -211,6 +242,8 @@ def main() -> None:
         "drop_features": drop_feats, "val_frac": args.val_frac,
         "val_start_date": args.val_start_date,
         "train_quality_limit": args.train_quality_limit,
+        "quality_weight_mult": args.quality_weight_mult,
+        "quality_weight_top": args.quality_weight_top,
     }, indent=2))
     (out / "metrics.json").write_text(json.dumps(summary, indent=2, default=str))
     per_thr.to_csv(out / "per_threshold.csv", index=False)

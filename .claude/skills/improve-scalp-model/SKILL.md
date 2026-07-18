@@ -6,10 +6,16 @@ description: Run one protocol-clean improvement round on the ScalpTrader scalp-e
 # Improve the scalp model (one round)
 
 All paths relative to /Users/sreenathkunapuli/ScalpTrader; python is `.venv/bin/python`.
-Delegate every command run and doc edit to claude-sonnet-5 subagents (pass the
-model id EXPLICITLY — the 'sonnet' alias is an older model). You design, review,
-and gate. Long commands (20-60 min): agents must nohup-background them and poll
-a log; never let a foreground timeout kill a run.
+Delegation — match the subagent model to the task, full ladder allowed:
+claude-sonnet-5 (pass the id EXPLICITLY — the 'sonnet' alias is an older
+model) for command runs, doc edits, and tightly-specced plumbing; opus for
+mid-complexity logic where sonnet risks subtle errors; fable (tight scope,
+low effort) only where judgment genuinely moves trading results — adversarial
+causality/parity reviews, quant-critical design. Be mindful of tokens: strong
+models only where they make a real difference. Haiku is too weak for this
+project. You design, review, and gate. Long commands (20-60 min): agents must
+nohup-background them and poll a log; never let a foreground timeout kill a
+run.
 
 ## Non-negotiable ground rules
 

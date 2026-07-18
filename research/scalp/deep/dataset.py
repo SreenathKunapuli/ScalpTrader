@@ -31,6 +31,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import torch
 
 from ..bars_features import build_features
 from ..triple_barrier import label_scalps
@@ -44,6 +45,7 @@ __all__ = [
     "save_scaler",
     "load_scaler",
     "subsample_negatives",
+    "JitterDataset",
 ]
 
 
@@ -237,3 +239,49 @@ def subsample_negatives(
     keep = pos_mask.copy()
     keep[neg_mask] = neg_keep
     return X[keep], y[keep], idx[keep]
+
+
+# --------------------------------------------------------------------------- #
+# Train-time augmentation: additive Gaussian jitter, re-drawn every epoch
+# --------------------------------------------------------------------------- #
+class JitterDataset(torch.utils.data.Dataset):
+    """TRAIN-SET-ONLY augmentation wrapper: adds fresh N(0, sigma) Gaussian
+    noise to the already-SCALED window tensor `X`, redrawn once per epoch.
+
+    Val loaders must NEVER be wrapped in this — scalp.deep.train_loop.train
+    calls set_epoch(epoch) on train_loader.dataset only (never
+    val_loader.dataset), and train_tcn.py only ever wraps the train split.
+    `sigma <= 0` disables augmentation entirely: __getitem__ then returns X
+    unmodified and no RNG is ever drawn, so wrapping unconditionally at the
+    default --jitter-sigma 0.0 is a no-op byte-for-byte.
+
+    Reproducibility: set_epoch(epoch) reseeds a fresh torch.Generator from
+    `seed + epoch` and materializes the noise tensor for that epoch in one
+    shot (same shape as X) — the same (seed, epoch) pair always redraws
+    identical noise, and every epoch draws a fresh one.
+    """
+
+    def __init__(self, X: torch.Tensor, y: torch.Tensor, sigma: float,
+                seed: int):
+        self.X = X
+        self.y = y
+        self.sigma = float(sigma)
+        self.seed = int(seed)
+        self._noise: torch.Tensor | None = None
+        self.set_epoch(0)
+
+    def set_epoch(self, epoch: int) -> None:
+        if self.sigma <= 0.0:
+            self._noise = None
+            return
+        gen = torch.Generator().manual_seed(self.seed + int(epoch))
+        self._noise = torch.randn(self.X.shape, generator=gen) * self.sigma
+
+    def __len__(self) -> int:
+        return len(self.X)
+
+    def __getitem__(self, i: int) -> tuple[torch.Tensor, torch.Tensor]:
+        x = self.X[i]
+        if self._noise is not None:
+            x = x + self._noise[i]
+        return x, self.y[i]

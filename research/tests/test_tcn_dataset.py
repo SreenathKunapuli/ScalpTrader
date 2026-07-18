@@ -10,7 +10,8 @@ import pytest
 
 from scalp.bars_features import build_features
 from scalp.deep.dataset import (apply_scaler, build_windows, fit_scaler,
-                                subsample_negatives, windows_for_all_seconds)
+                                save_scaler, subsample_negatives,
+                                windows_for_all_seconds)
 from scalp.triple_barrier import label_scalps
 from scalp.walkforward import TrainConfig, barrier_arrays
 
@@ -368,6 +369,128 @@ def test_tcn_prob_model_predict_proba_rejects_multi_day_concatenation():
     # contiguous slice is accepted
     proba = wrapped.predict_proba(feats.loc[day1])
     assert proba.shape == (len(day1), 2)
+
+
+# --------------------------------------------------------------------------- #
+# phase B: train-time augmentation (JitterDataset) — TRAIN SET ONLY
+# --------------------------------------------------------------------------- #
+def test_jitter_dataset_augments_train_batches_and_changes_between_epochs():
+    """JitterDataset is the wrapper train_tcn.py puts ONLY around the train
+    split (never val, see train_loop.train and its own test below). This
+    checks the class itself: noise is actually added, redrawing is
+    reproducible from (seed, epoch), fresh noise is drawn every epoch, and
+    sigma<=0 disables augmentation entirely (exact passthrough)."""
+    torch = pytest.importorskip("torch")
+    from scalp.deep.dataset import JitterDataset
+
+    n, n_feat, window_s = 20, 3, 5
+    rng = np.random.default_rng(1)
+    X = torch.from_numpy(rng.normal(size=(n, n_feat, window_s)).astype(np.float32))
+    y = torch.from_numpy((rng.random(n) < 0.5).astype(np.float32))
+
+    ds = JitterDataset(X, y, sigma=0.5, seed=42)
+    ds.set_epoch(0)
+    batch0 = torch.stack([ds[i][0] for i in range(n)])
+    assert not torch.allclose(batch0, X)          # noise was actually added
+
+    # reproducible: same (seed, epoch) -> identical noise
+    ds2 = JitterDataset(X, y, sigma=0.5, seed=42)
+    ds2.set_epoch(0)
+    batch0_again = torch.stack([ds2[i][0] for i in range(n)])
+    torch.testing.assert_close(batch0, batch0_again)
+
+    # fresh noise every epoch
+    ds.set_epoch(1)
+    batch1 = torch.stack([ds[i][0] for i in range(n)])
+    assert not torch.allclose(batch0, batch1)
+
+    # sigma<=0 disables augmentation entirely -> exact passthrough
+    ds_off = JitterDataset(X, y, sigma=0.0, seed=42)
+    batch_off = torch.stack([ds_off[i][0] for i in range(n)])
+    torch.testing.assert_close(batch_off, X)
+
+    # labels are never touched by jitter
+    for i in range(n):
+        torch.testing.assert_close(ds[i][1], y[i])
+
+
+def test_train_loop_val_batches_bit_identical_with_train_jitter_on():
+    """scalp.deep.train_loop.train calls set_epoch on train_loader.dataset
+    only -- val_loader.dataset must never be wrapped in JitterDataset (this
+    reproduces train_tcn.py's exact wiring: train wrapped, val a plain
+    TensorDataset) and its batches must come out bit-identical to the raw
+    val tensor, epoch after epoch, even with jitter cranked up on train."""
+    torch = pytest.importorskip("torch")
+    from torch.utils.data import DataLoader, TensorDataset
+
+    from scalp.deep.dataset import JitterDataset
+    from scalp.deep.model import ScalpTCN
+    from scalp.deep.train_loop import train
+
+    n_feat, window_s = 3, 6
+    n_tr, n_val = 32, 10
+    rng = np.random.default_rng(2)
+    x_tr = torch.from_numpy(rng.normal(size=(n_tr, n_feat, window_s)).astype(np.float32))
+    y_tr = torch.from_numpy((rng.random(n_tr) < 0.5).astype(np.float32))
+    x_val = torch.from_numpy(rng.normal(size=(n_val, n_feat, window_s)).astype(np.float32))
+    y_val = torch.from_numpy((rng.random(n_val) < 0.5).astype(np.float32))
+    x_val_orig = x_val.clone()
+
+    train_loader = DataLoader(JitterDataset(x_tr, y_tr, sigma=1.0, seed=7),
+                              batch_size=8, shuffle=False)
+    val_loader = DataLoader(TensorDataset(x_val, y_val), batch_size=8,
+                            shuffle=False)
+
+    torch.manual_seed(0)
+    model = ScalpTCN(n_features=n_feat, window_s=window_s, channels=4,
+                     blocks=1, dropout=0.0)
+    train(model, (train_loader, val_loader), epochs=3, lr=1e-3,
+         pos_weight=1.0, device=torch.device("cpu"), patience=10,
+         verbose=False)
+
+    val_batches = torch.cat([xb for xb, _ in val_loader])
+    torch.testing.assert_close(val_batches, x_val_orig)
+
+
+# --------------------------------------------------------------------------- #
+# phase B: sim_eval.py --tcn-run-dir adapter (TcnProbModel via day_entries)
+# --------------------------------------------------------------------------- #
+def test_sim_eval_tcn_run_dir_loads_and_scores_synthetic_day(tmp_path):
+    """TcnProbModel.load(run_dir) must reconstruct a model.pt/scaler.json/
+    config.json triple laid out exactly like train_tcn.py's artifacts, and
+    the loaded model must be a drop-in for scripts.sim_eval.day_entries'
+    `model` argument -- same predict_proba interface the GBT rung uses."""
+    torch = pytest.importorskip("torch")
+    import json
+
+    from scalp.deep.model import ScalpTCN, TcnProbModel
+    from scripts.sim_eval import day_entries
+
+    bars = make_frame(n=N)
+    day_file = tmp_path / "SYM_2025-01-06.parquet"
+    bars.to_parquet(day_file)
+
+    cfg = _cfg()
+    scaler = fit_scaler([day_file], cfg, window_s=WINDOW)
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    save_scaler(scaler, run_dir / "scaler.json")
+    n_feat = len(scaler["feature_names"])
+    tiny = ScalpTCN(n_features=n_feat, window_s=WINDOW, channels=4, blocks=1,
+                    dropout=0.0)
+    torch.save(tiny.state_dict(), run_dir / "model.pt")
+    (run_dir / "config.json").write_text(json.dumps({
+        "window": WINDOW, "channels": 4, "blocks": 1, "dropout": 0.0,
+    }))
+
+    loaded = TcnProbModel.load(run_dir, device=torch.device("cpu"))
+    assert list(loaded.classes_) == [0.0, 1.0]
+
+    entries, lab = day_entries(bars, loaded, cfg, threshold=0.0, qty=100)
+    assert not entries.empty                       # battery isn't vacuous
+    assert set(entries.columns) == {"qty", "target_px", "stop_px", "deadline"}
+    assert lab.index.equals(entries.index)
 
 
 if __name__ == "__main__":

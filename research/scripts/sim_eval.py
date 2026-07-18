@@ -30,6 +30,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scalp.bars_features import build_features  # noqa: E402
+from scalp.deep.model import TcnProbModel  # noqa: E402
 from scalp.sim import SimConfig, simulate  # noqa: E402
 from scalp.triple_barrier import label_scalps  # noqa: E402
 from scalp.walkforward import TrainConfig, barrier_arrays, build_dataset, \
@@ -148,6 +149,15 @@ def main() -> None:
                    help="number of leading status=='ok' manifest rows "
                         "(fetch-priority / quality-rank order) treated as "
                         "'top quality' for --quality-weight-mult")
+    p.add_argument("--tcn-run-dir", default=None,
+                   help="load the TCN deep-rung model from this "
+                        "train_tcn.py run dir (model.pt + scaler.json + "
+                        "config.json) via scalp.deep.model.TcnProbModel."
+                        "load, instead of fitting a GBT — SKIPS the GBT "
+                        "dataset build + fit entirely. Everything "
+                        "downstream (day_entries gating, simulate, report) "
+                        "is unchanged. HP flags and --drop-features are "
+                        "ignored in this mode and must be left unset.")
     args = p.parse_args()
 
     cfg = TrainConfig(target_ps=args.target_ps, stop_ps=args.stop_ps,
@@ -162,6 +172,11 @@ def main() -> None:
              max_leaf_nodes=args.max_leaf_nodes,
              min_samples_leaf=args.min_samples_leaf,
              l2_regularization=args.l2_regularization)
+    if args.tcn_run_dir is not None:
+        assert not drop_feats, \
+            "--drop-features is ignored with --tcn-run-dir; leave it unset"
+        assert all(v is None for v in hp.values()), \
+            "HP flags are ignored with --tcn-run-dir; leave them unset"
     man = pd.read_csv(MANIFEST)
     ok = man[man["status"] == "ok"]
     files = [CORPUS_DIR / f"{r.symbol}_{r.date}.parquet"
@@ -176,29 +191,36 @@ def main() -> None:
     print(f"stock-days: {len(files)} -> train {len(train_files)} | "
           f"test {len(test_files)} | threshold {args.threshold}")
 
-    if args.train_quality_limit is not None:
-        train_files = limit_by_quality(train_files, files,
-                                       args.train_quality_limit)
-        print(f"  quality-limit: train fit restricted to top "
-              f"{args.train_quality_limit} manifest rows -> "
-              f"{len(train_files)} files")
+    if args.tcn_run_dir is not None:
+        run_dir = Path(args.tcn_run_dir)
+        if not run_dir.is_absolute():
+            run_dir = ROOT / run_dir
+        print(f"loading TCN model from {run_dir} ...", flush=True)
+        model = TcnProbModel.load(run_dir)
+    else:
+        if args.train_quality_limit is not None:
+            train_files = limit_by_quality(train_files, files,
+                                           args.train_quality_limit)
+            print(f"  quality-limit: train fit restricted to top "
+                  f"{args.train_quality_limit} manifest rows -> "
+                  f"{len(train_files)} files")
 
-    print("fitting model on train days ...", flush=True)
-    x_tr, y_tr, m_tr = build_dataset(train_files, cfg)
-    x_tr = drop_columns(x_tr, drop_feats)
+        print("fitting model on train days ...", flush=True)
+        x_tr, y_tr, m_tr = build_dataset(train_files, cfg)
+        x_tr = drop_columns(x_tr, drop_feats)
 
-    weight_mult = None
-    if args.quality_weight_mult is not None:
-        top_stems = {f.stem for f in files[:args.quality_weight_top]}
-        weight_mult = quality_weight_array(m_tr, top_stems,
-                                           args.quality_weight_mult)
-        print(f"  quality-weight: top {args.quality_weight_top} manifest "
-              f"rows -> x{args.quality_weight_mult} "
-              f"({int((weight_mult != 1.0).sum())} of {len(weight_mult)} "
-              f"rows)", flush=True)
+        weight_mult = None
+        if args.quality_weight_mult is not None:
+            top_stems = {f.stem for f in files[:args.quality_weight_top]}
+            weight_mult = quality_weight_array(m_tr, top_stems,
+                                               args.quality_weight_mult)
+            print(f"  quality-weight: top {args.quality_weight_top} manifest "
+                  f"rows -> x{args.quality_weight_mult} "
+                  f"({int((weight_mult != 1.0).sum())} of {len(weight_mult)} "
+                  f"rows)", flush=True)
 
-    model = fit_model(x_tr, y_tr, cfg.seed, sample_weight_mult=weight_mult,
-                      **hp)
+        model = fit_model(x_tr, y_tr, cfg.seed, sample_weight_mult=weight_mult,
+                          **hp)
 
     modes = {
         "taker": SimConfig(entry_mode="taker", fees=cfg.fees,

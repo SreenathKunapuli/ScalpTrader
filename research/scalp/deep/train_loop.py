@@ -72,6 +72,11 @@ def train(
     best_ap, best_state, bad_epochs = -1.0, None, 0
 
     for epoch in range(epochs):
+        # train-only augmentation hook (scalp.deep.dataset.JitterDataset):
+        # redraw this epoch's noise. val_loader.dataset is never touched
+        # here, so val batches stay bit-identical regardless of jitter.
+        if hasattr(train_loader.dataset, "set_epoch"):
+            train_loader.dataset.set_epoch(epoch)
         model.train()
         t0 = time.time()
         total_loss, n_batches = 0.0, 0

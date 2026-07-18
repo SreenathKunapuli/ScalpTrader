@@ -31,11 +31,11 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader, TensorDataset, WeightedRandomSampler
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from scalp.deep.dataset import apply_scaler, build_windows, fit_scaler, \
-    save_scaler, subsample_negatives  # noqa: E402
+from scalp.deep.dataset import JitterDataset, apply_scaler, build_windows, \
+    fit_scaler, save_scaler, subsample_negatives  # noqa: E402
 from scalp.deep.model import ScalpTCN, pick_device  # noqa: E402
 from scalp.deep.train_loop import train  # noqa: E402
 from scalp.walkforward import TrainConfig, split_days  # noqa: E402
@@ -44,6 +44,10 @@ from scripts.train_scalper import limit_by_quality  # noqa: E402
 ROOT = Path(__file__).resolve().parents[2]
 MANIFEST = ROOT / "data" / "corpus" / "manifest.csv"
 CORPUS_DIR = ROOT / "data" / "corpus" / "1s"
+# "top quality" convention shared with train_scalper.py / sim_eval.py's
+# --quality-weight-top default: the first N status=='ok' manifest rows in
+# fetch-priority / quality-rank order.
+QUALITY_TOP_N = 451
 
 
 def _git_head() -> str:
@@ -61,13 +65,19 @@ def _file_key(path: Path) -> str:
 
 def _load_split(
     files: list[Path], cfg: TrainConfig, window_s: int, scaler: dict,
-    neg_frac: float | None,
-) -> tuple[np.ndarray, np.ndarray]:
+    neg_frac: float | None, quality_stems: set[str] | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
     """Build causal windows for every file, apply the (train-days-only)
     scaler, and (train split only, via neg_frac) subsample negatives.
     `neg_frac=None` disables subsampling — used for val, so early-stopping
-    AP is measured on the real class balance."""
-    xs, ys = [], []
+    AP is measured on the real class balance.
+
+    `quality_stems`, if given, additionally builds a bool array (aligned
+    1:1 with the returned samples) marking which samples came from a file
+    whose stem ("{symbol}_{date}") is in `quality_stems` — feeds
+    --quality-oversample's WeightedRandomSampler weights. None (default)
+    skips this bookkeeping and the third return is None."""
+    xs, ys, quals = [], [], []
     for path in files:
         bars = pd.read_parquet(path)
         X, y, idx = build_windows(bars, cfg, window_s)
@@ -80,9 +90,12 @@ def _load_split(
                 continue
         xs.append(apply_scaler(X, scaler))
         ys.append(y)
+        if quality_stems is not None:
+            quals.append(np.full(len(y), path.stem in quality_stems))
     if not xs:
         raise ValueError("no samples in this file set")
-    return np.concatenate(xs, axis=0), np.concatenate(ys, axis=0)
+    q_all = np.concatenate(quals, axis=0) if quality_stems is not None else None
+    return np.concatenate(xs, axis=0), np.concatenate(ys, axis=0), q_all
 
 
 def main() -> None:
@@ -122,6 +135,24 @@ def main() -> None:
     p.add_argument("--batch", type=int, default=512)
     p.add_argument("--neg-frac", type=float, default=0.15)
     p.add_argument("--patience", type=int, default=5)
+    p.add_argument("--jitter-sigma", type=float, default=0.0,
+                   help="train-only augmentation: each epoch, add fresh "
+                        "N(0, sigma) Gaussian noise to the SCALED training "
+                        "windows (torch.Generator seeded from --seed + "
+                        "epoch, so runs reproduce and every epoch draws "
+                        "fresh noise); 0.0 (default) disables augmentation "
+                        "entirely. The val loader is NEVER augmented, "
+                        "regardless of this flag.")
+    p.add_argument("--quality-oversample", type=int, default=1,
+                   help="oversampling knob: training samples whose source "
+                        f"day is among the first {QUALITY_TOP_N} "
+                        "status=='ok' manifest rows (fetch-priority / "
+                        "quality-rank order) get this x sampling weight "
+                        "via WeightedRandomSampler; 1 (default) is a no-op "
+                        "(keeps today's shuffle=True DataLoader). Only "
+                        "meaningful when training beyond the top-"
+                        f"{QUALITY_TOP_N} files (e.g. --train-quality-limit "
+                        "unset or > that).")
     p.add_argument("--out", default="runs/tcn")
     args = p.parse_args()
 
@@ -186,16 +217,24 @@ def main() -> None:
     n_features = len(scaler["feature_names"])
     print(f"  {n_features} features, {scaler['n_train_files']} files")
 
+    quality_stems = None
+    if args.quality_oversample != 1:
+        quality_stems = {f.stem for f in files[:QUALITY_TOP_N]}
+
     print("building train windows ...", flush=True)
-    x_tr, y_tr = _load_split(core_train_files, cfg, args.window, scaler,
-                             args.neg_frac)
+    x_tr, y_tr, q_tr = _load_split(core_train_files, cfg, args.window, scaler,
+                                   args.neg_frac, quality_stems)
     print(f"  {len(y_tr):,} samples; positive rate "
           f"{float(y_tr.mean()):.4f}", flush=True)
+    if q_tr is not None:
+        print(f"  quality-oversample: {int(q_tr.sum()):,}/{len(y_tr):,} "
+              f"train samples from top {QUALITY_TOP_N} manifest rows -> "
+              f"x{args.quality_oversample} sampling weight", flush=True)
 
     if val_files:
         print("building val windows ...", flush=True)
-        x_val, y_val = _load_split(val_files, cfg, args.window, scaler,
-                                   neg_frac=None)
+        x_val, y_val, _ = _load_split(val_files, cfg, args.window, scaler,
+                                      neg_frac=None)
         print(f"  {len(y_val):,} samples; positive rate "
               f"{float(y_val.mean()):.4f}", flush=True)
     else:
@@ -204,10 +243,21 @@ def main() -> None:
 
     device = pick_device()
     torch.manual_seed(args.seed)
+    # train-only augmentation: sigma<=0 (default) is a byte-for-byte no-op,
+    # so this wraps unconditionally (see JitterDataset docstring).
+    train_dataset = JitterDataset(
+        torch.from_numpy(x_tr), torch.from_numpy(y_tr.astype(np.float32)),
+        sigma=args.jitter_sigma, seed=args.seed,
+    )
+    sampler = None
+    if q_tr is not None:
+        weights = np.where(q_tr, float(args.quality_oversample), 1.0)
+        sampler = WeightedRandomSampler(torch.from_numpy(weights),
+                                        num_samples=len(weights),
+                                        replacement=True)
     train_loader = DataLoader(
-        TensorDataset(torch.from_numpy(x_tr),
-                     torch.from_numpy(y_tr.astype(np.float32))),
-        batch_size=args.batch, shuffle=True, drop_last=True,
+        train_dataset, batch_size=args.batch, sampler=sampler,
+        shuffle=(sampler is None), drop_last=True,
     )
     val_loader = DataLoader(
         TensorDataset(torch.from_numpy(x_val),
@@ -234,6 +284,9 @@ def main() -> None:
         "blocks": args.blocks, "dropout": args.dropout,
         "epochs": args.epochs, "lr": args.lr, "batch": args.batch,
         "neg_frac": args.neg_frac, "patience": args.patience,
+        "jitter_sigma": args.jitter_sigma,
+        "quality_oversample": args.quality_oversample,
+        "quality_top_n": QUALITY_TOP_N,
         "seed": args.seed, "n_features": n_features,
         "n_core_train_days": len(core_train_files),
         "n_val_days": len(val_files), "n_train_samples": int(len(y_tr)),

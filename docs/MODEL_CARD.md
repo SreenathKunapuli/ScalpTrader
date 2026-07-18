@@ -32,6 +32,16 @@ proved large caps do NOT have.
   ret_5/15/60/300s, mom_accel, vwap_dist, pullback, vol_surge, tape_speed,
   spread_bps, quote_ok, tod_min. Causality enforced by
   `research/tests/test_no_lookahead.py` (rewrite-the-future battery).
+- **Microstructure features added 2026-07-18** (7, bringing the total to
+  19): qimb, qimb_chg_30s, spread_rel, bid_ret_15s, sess_hi_dist, up_streak,
+  tsize_surge — same causality battery. On the identical 451-day corpus /
+  122 OOS test days, best-threshold expectancy improves at both grid
+  thresholds: thr 0.6 +0.83¢/sh → +1.61¢/sh (sum PnL @1000sh $12,775 →
+  $27,127), thr 0.7 +4.08¢/sh → +5.00¢/sh ($7,107 → $13,090). Run
+  `runs/scalper/20260718_015432` vs baseline `runs/scalper/20260717_043822`.
+  Permutation importance on that run (`feature_importances.csv`) is
+  **negative for 3 of the 7 new features — qimb_chg_30s, bid_ret_15s,
+  sess_hi_dist** — prune candidates at the next big-corpus retrain.
 - **Labels**: cost-aware triple-barrier, long-only, entry at ask, WIN
   requires bid ≥ entry + target + sell-fee. Barriers are **vol-scaled
   per row** (mult × trailing 300s price range, floored at 2¢/1.5¢, causal);
@@ -90,14 +100,27 @@ unenforceable on gap-prone tapes and is the entire loss.
 | 0.6 | timeout-only | −$16.5k | +$26.9k | 20260717_120950 |
 | 0.7 | 1× (label) | −$22.1k | −$12.1k | 20260717_114814 |
 | 0.7 | 3× | −$2.3k | +$8.4k | 20260717_121932 |
-| **0.7** | **timeout-only** | **+$19.4k (+5.86¢/sh)** | **+$36.4k (+10.38¢/sh)** | 20260717_122933 |
+| 0.7 | timeout-only | +$19.4k (+5.86¢/sh) | +$36.4k (+10.38¢/sh) | 20260717_122933 |
+| 0.7 | timeout-only, **19-feature model** (`--limit 451`) | +$18,511 | +$29,783 | runs/sim_eval/20260718_020553 |
+| **0.6** | **timeout-only, 19-feature model** (`--limit 451`) | **+$12,330** | **+$65,582** | runs/sim_eval/20260718_021932 |
 
 Even 3× stops lose: when they trigger they pay 58–68¢/sh gap-through.
-**Validated config: threshold 0.7, timeout-only exits (far disaster stop),
-120s timeout.** Taker: 396 fills (~3.2/day), win rate 56.8%, median
-+3¢/sh, p05 −83¢/sh, worst single trade −$3.0k — per-trade tail risk is
-bounded by the loss caps and daily breaker, not by a price stop (which the
-data shows cannot execute anywhere near its price on these tapes).
+The original 12-feature validated config was threshold 0.7, timeout-only
+exits (far disaster stop), 120s timeout (taker: 396 fills ~3.2/day, win
+rate 56.8%, median +3¢/sh, p05 −83¢/sh, worst single trade −$3.0k).
+
+**NEW deployed config (2026-07-18): 19-feature model, threshold 0.6,
+timeout-only exits.** Chosen over the thr-0.7 19-feature row because it is
+sim-positive in BOTH entry modes (taker +$12,330, maker +$65,582) and the
+live engine enters maker-first — thr 0.7 taker is also positive here, but
+0.6 wins on the maker leg that the engine actually uses first. Per-trade
+tail risk is bounded by the loss caps and daily breaker, not by a price
+stop (the data shows a tight stop cannot execute anywhere near its price
+on these tapes). **Caveat: this selection was made by comparing across
+multiple sim_eval runs (two thresholds × two feature sets × two entry
+modes) — a selection-bias risk inherent to picking the best cell after the
+fact. Paper validation per `docs/LIVE_PROMOTION.md` must reproduce this
+config's edge before it is trusted live.**
 Engine alignment: `inference.json exec_stop_mult` (export_model.py,
 default 1000) — sizing still prices its Kelly loss leg off the label stop.
 

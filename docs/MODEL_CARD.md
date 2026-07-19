@@ -370,22 +370,28 @@ matched-122-day subset vs deployed:
 | **26-feat @0.7 (NEW DEPLOY)** | **+$40,930 (+7.40¢)** | **+$39,652 (+6.80¢)** | taker +$67 / maker +$9,680 |
 | 26-feat @0.6 | +$14,147 | +$51,685 | taker −$60,918 / maker −$14,096 |
 
-Deployment decision — the formal 0.6-maker bar (+$65.6k) was NOT beaten;
-the 26-feat @0.7 cell was deployed anyway on explicit judgment grounds,
-recorded here: (a) its WORST leg (+$39.7k) is 3.2× the old config's worst
-leg (+$12.3k), and the old +$65.6k ceiling sits entirely in the maker
-leg — the number most fragile to live queue-position reality; (b) both
-legs agree (~$40k), so the result is robust to fill-mode uncertainty;
-(c) it is the only candidate ever to be non-negative on the hostile
-239-day tier — regime robustness; (d) ~7¢/sh expectancy at 4.7 trades/day
-(hit 17.8% barrier / ~25% sim target rate); (e) the thr-0.7 preference
-was pre-registered in round 6's conclusion before this round ran.
-**Selection-bias caveat: cells were compared across thresholds and
-feature sets; Monday paper trading must reproduce this cell's edge per
-docs/LIVE_PROMOTION.md before any live trust. Rollback = flip
-SCALP_ARTIFACT_DIR back to runs/scalper/20260718_015432.**
-Artifact: runs/scalper/20260719_112357 (model fit on all top-451 days,
-26 features, threshold 0.7, exec_stop_mult 1000).
+Deployment decision (user directive: "whichever makes more money wins" —
+no threshold preference). Which cell earns more LIVE depends on one
+unknown: the fraction h of the sim's maker-fill advantage that survives
+real queues. Blend arithmetic on matched days: old 19-feat@0.6 beats
+26-feat@0.7 only if h > ~0.52; below that, 0.7 wins. h is measurable
+only with real fills — so the deployed config is the MEASUREMENT
+configuration: **26-feature model, threshold 0.6** (wide net, ~25
+trades/day of evidence). Every entry logs p_win (`scalp.entry` line), so
+paper decomposes into the 0.6 operating point (all trades) AND the 0.7
+operating point (p≥0.7 subset) with real fills, plus measured h — after
+1-2 paper weeks, the threshold with the larger measured PnL is locked,
+and measured h also retro-judges the old 19-feat maker ceiling.
+Judgment notes for the record: the 26-feat@0.7 cell is the only one
+non-negative on the hostile 239-day tier, both its legs agree (~$40k),
+and its worst leg is 3.2× the old config's floor; the old +$65.6k
+ceiling is maker-concentrated and thus queue-fragile. **Selection-bias
+caveat: cells were compared across thresholds and feature sets; paper
+must reproduce the edge per docs/LIVE_PROMOTION.md before live trust.
+Rollback = SCALP_ARTIFACT_DIR back to runs/scalper/20260718_015432.**
+Artifact: runs/scalper/20260719_112357 (fit on all top-451 days, 26
+features, inference threshold 0.6 with the measurement note recorded,
+exec_stop_mult 1000). Verified loading through ScalpGbtSignal.
 
 ## Scanner ranker (which stocks to watch)
 

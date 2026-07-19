@@ -154,6 +154,54 @@ def build_features(
             .median().replace(0, np.nan)
 
     # ------------------------------------------------------------------
+    # Order-flow imbalance: sign(price change) * volume, rolling 60s
+    # ------------------------------------------------------------------
+    signed_vol = np.sign(px.diff()) * bars["volume"]
+    flow_sum_60 = signed_vol.rolling(60, min_periods=1).sum()
+    vol_sum_60 = bars["volume"].rolling(60, min_periods=1).sum()
+    with np.errstate(invalid="ignore", divide="ignore"):
+        out["flow_imb_60s"] = flow_sum_60 / vol_sum_60.replace(0, np.nan)
+    out["flow_imb_chg"] = out["flow_imb_60s"] - out["flow_imb_60s"].shift(30)
+
+    # ------------------------------------------------------------------
+    # LULD-up proximity: distance to an approximate upper limit-up band
+    # ------------------------------------------------------------------
+    luld_ref = px.rolling(300, min_periods=30).mean()
+    luld_band = luld_ref * 1.10
+    with np.errstate(invalid="ignore", divide="ignore"):
+        out["luld_up_dist"] = (luld_band - px) / px.replace(0, np.nan)
+
+    # ------------------------------------------------------------------
+    # Round-number magnetism: signed distance to nearest half-dollar level
+    # ------------------------------------------------------------------
+    nearest_round = (px / 0.50).round() * 0.50
+    with np.errstate(invalid="ignore", divide="ignore"):
+        out["round_dist"] = (px - nearest_round) / px.replace(0, np.nan)
+
+    # ------------------------------------------------------------------
+    # Range compression: short high-low range vs long high-low range
+    # ------------------------------------------------------------------
+    range_60 = (bars["high"].rolling(60, min_periods=1).max()
+                - bars["low"].rolling(60, min_periods=1).min())
+    range_300 = (bars["high"].rolling(300, min_periods=30).max()
+                 - bars["low"].rolling(300, min_periods=30).min())
+    with np.errstate(invalid="ignore", divide="ignore"):
+        out["range_compress"] = range_60 / range_300.replace(0, np.nan)
+
+    # ------------------------------------------------------------------
+    # Momentum freshness: seconds since the running session high was set
+    # ------------------------------------------------------------------
+    at_new_hi = (px >= px.cummax()).astype(float)
+    grp_hi = (at_new_hi == 1).cumsum()
+    stale = (at_new_hi == 0).groupby(grp_hi).cumsum()
+    out["mom_fresh"] = stale.clip(upper=600) / 600.0
+
+    # ------------------------------------------------------------------
+    # VWAP-distance slope: change in vwap_dist over the last 60s
+    # ------------------------------------------------------------------
+    out["vwap_slope"] = out["vwap_dist"] - out["vwap_dist"].shift(60)
+
+    # ------------------------------------------------------------------
     # Quote validity flag
     # ------------------------------------------------------------------
     out["quote_ok"] = np.where(

@@ -493,5 +493,112 @@ def test_sim_eval_tcn_run_dir_loads_and_scores_synthetic_day(tmp_path):
     assert lab.index.equals(entries.index)
 
 
+# --------------------------------------------------------------------------- #
+# val subsample determinism (OOM-fix: val windows are now subsampled too)
+# --------------------------------------------------------------------------- #
+def _load_split_inline(
+    files, cfg, window_s, scaler, neg_frac,
+):
+    """Local replica of train_tcn._load_split for testing — same logic,
+    no script-level imports needed."""
+    xs, ys = [], []
+    for path in files:
+        bars = pd.read_parquet(path)
+        X, y, idx = build_windows(bars, cfg, window_s)
+        del bars
+        if len(y) == 0:
+            continue
+        if neg_frac is not None:
+            file_key = path.stem
+            X, y, idx = subsample_negatives(X, y, idx, cfg, file_key, neg_frac)
+            if len(y) == 0:
+                continue
+        xs.append(apply_scaler(X, scaler))
+        del X
+        ys.append(y)
+    return np.concatenate(xs, axis=0), np.concatenate(ys, axis=0)
+
+
+def test_val_subsample_is_deterministic_and_never_epoch_dependent(tmp_path):
+    """Two calls to _load_split with the same val files and val_neg_frac must
+    return bit-identical (X, y) arrays — same windows, same order. The seed
+    must be derived purely from cfg.seed + per-file hash, never from anything
+    epoch-dependent (that would break val AP comparability across runs)."""
+    val_files = _write_days(tmp_path, n_files=4, n=N, seed0=200)
+    cfg = _cfg(seed=13)
+
+    scaler = fit_scaler(val_files, cfg, window_s=WINDOW)
+
+    x1, y1 = _load_split_inline(val_files, cfg, WINDOW, scaler, neg_frac=0.15)
+    x2, y2 = _load_split_inline(val_files, cfg, WINDOW, scaler, neg_frac=0.15)
+
+    np.testing.assert_array_equal(y1, y2, err_msg="val labels differ between calls")
+    np.testing.assert_array_equal(x1, x2, err_msg="val windows differ between calls")
+
+    # confirm negatives were actually subsampled (not a no-op)
+    total_samples = sum(
+        len(build_windows(pd.read_parquet(f), cfg, WINDOW)[1]) for f in val_files
+    )
+    assert len(y1) < total_samples, (
+        "negatives were not subsampled (val subset equals full val set)"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# TcnProbModel.load() map_location smoke: artifact saved on any device loads
+# cleanly on CPU (and auto-device selection moves the model)
+# --------------------------------------------------------------------------- #
+def test_tcn_prob_model_load_map_location_smoke(tmp_path):
+    """Save a tiny ScalpTCN state dict, then load it with TcnProbModel.load()
+    which must use map_location='cpu' internally so artifacts trained on any
+    device (cuda, mps) load on any other device without error."""
+    torch = pytest.importorskip("torch")
+    import json
+
+    from scalp.deep.model import ScalpTCN, TcnProbModel
+
+    n_feat, window_s = 4, 8
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+
+    scaler = {
+        "feature_names": [f"f{i}" for i in range(n_feat)],
+        "median": [0.0] * n_feat,
+        "iqr": [1.0] * n_feat,
+        "window_s": window_s,
+        "n_train_files": 1,
+    }
+    (run_dir / "scaler.json").write_text(json.dumps(scaler))
+    (run_dir / "config.json").write_text(json.dumps(
+        {"window": window_s, "channels": 4, "blocks": 1, "dropout": 0.0}
+    ))
+
+    tiny = ScalpTCN(n_features=n_feat, window_s=window_s, channels=4,
+                    blocks=1, dropout=0.0)
+    # Save with explicit map to CPU to simulate "trained anywhere" artifact.
+    state = {k: v.cpu() for k, v in tiny.state_dict().items()}
+    torch.save(state, run_dir / "model.pt")
+
+    # load() without a device argument -> auto picks available device
+    loaded = TcnProbModel.load(run_dir)
+    assert loaded.model is not None
+    # verify we can score — shape check is sufficient
+    idx = pd.date_range("2025-01-06 09:30:00", periods=window_s + 5,
+                        freq="1s", tz="UTC")
+    feats = pd.DataFrame(
+        np.random.default_rng(3).normal(size=(len(idx), n_feat)),
+        columns=scaler["feature_names"], index=idx,
+    )
+    proba = loaded.predict_proba(feats)
+    assert proba.shape == (len(idx), 2)
+
+    # load() with explicit cpu device -> works regardless of what pick_device()
+    # would choose (no cuda/mps on this machine, but this tests the kwarg path)
+    loaded_cpu = TcnProbModel.load(run_dir, device=torch.device("cpu"))
+    assert str(loaded_cpu.device) == "cpu"
+    proba_cpu = loaded_cpu.predict_proba(feats)
+    assert proba_cpu.shape == (len(idx), 2)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-q"])

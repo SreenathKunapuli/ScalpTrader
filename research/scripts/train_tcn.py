@@ -68,9 +68,10 @@ def _load_split(
     neg_frac: float | None, quality_stems: set[str] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
     """Build causal windows for every file, apply the (train-days-only)
-    scaler, and (train split only, via neg_frac) subsample negatives.
-    `neg_frac=None` disables subsampling — used for val, so early-stopping
-    AP is measured on the real class balance.
+    scaler, and optionally subsample negatives.
+    `neg_frac=None` disables subsampling (e.g. want the full class balance).
+    `neg_frac` is a float -> subsample each file's negatives independently
+    at that probability, seeded deterministically by cfg.seed + file hash.
 
     `quality_stems`, if given, additionally builds a bool array (aligned
     1:1 with the returned samples) marking which samples came from a file
@@ -81,6 +82,7 @@ def _load_split(
     for path in files:
         bars = pd.read_parquet(path)
         X, y, idx = build_windows(bars, cfg, window_s)
+        del bars  # full-day frame no longer needed
         if len(y) == 0:
             continue
         if neg_frac is not None:
@@ -89,6 +91,7 @@ def _load_split(
             if len(y) == 0:
                 continue
         xs.append(apply_scaler(X, scaler))
+        del X  # raw (unscaled) windows freed once scaled copy is appended
         ys.append(y)
         if quality_stems is not None:
             quals.append(np.full(len(y), path.stem in quality_stems))
@@ -134,6 +137,13 @@ def main() -> None:
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--batch", type=int, default=512)
     p.add_argument("--neg-frac", type=float, default=0.15)
+    p.add_argument("--val-neg-frac", type=float, default=None,
+                   help="negative subsampling fraction applied to the val "
+                        "windows (same deterministic seeding as train: "
+                        "cfg.seed + per-file hash, NEVER epoch-dependent). "
+                        "Default None uses the same value as --neg-frac, so "
+                        "every candidate model sees the identical val subset "
+                        "and val AP is comparable across runs.")
     p.add_argument("--patience", type=int, default=5)
     p.add_argument("--jitter-sigma", type=float, default=0.0,
                    help="train-only augmentation: each epoch, add fresh "
@@ -153,8 +163,25 @@ def main() -> None:
                         "meaningful when training beyond the top-"
                         f"{QUALITY_TOP_N} files (e.g. --train-quality-limit "
                         "unset or > that).")
+    p.add_argument("--device", choices=["auto", "mps", "cuda", "cpu"],
+                   default="auto",
+                   help="compute device for training. 'auto' (default) "
+                        "selects cuda if available, else mps, else cpu. "
+                        "ROCm/AMD torch builds report as cuda.")
     p.add_argument("--out", default="runs/tcn")
     args = p.parse_args()
+
+    # --val-neg-frac defaults to the same value as --neg-frac so the val
+    # subset is subsampled at the same rate as train, producing a fixed,
+    # deterministic val set that is comparable across runs.
+    val_neg_frac: float = (
+        args.neg_frac if args.val_neg_frac is None else args.val_neg_frac
+    )
+
+    if args.device == "auto":
+        device = pick_device()
+    else:
+        device = torch.device(args.device)
 
     cfg = TrainConfig(target_ps=args.target_ps, stop_ps=args.stop_ps,
                       timeout_s=args.timeout, barrier_mode=args.barrier_mode,
@@ -232,16 +259,15 @@ def main() -> None:
               f"x{args.quality_oversample} sampling weight", flush=True)
 
     if val_files:
-        print("building val windows ...", flush=True)
+        print(f"building val windows (val_neg_frac={val_neg_frac}) ...",
+              flush=True)
         x_val, y_val, _ = _load_split(val_files, cfg, args.window, scaler,
-                                      neg_frac=None)
+                                      neg_frac=val_neg_frac)
         print(f"  {len(y_val):,} samples; positive rate "
               f"{float(y_val.mean()):.4f}", flush=True)
     else:
         x_val = np.empty((0, n_features, args.window), dtype=np.float32)
         y_val = np.empty((0,), dtype=np.int8)
-
-    device = pick_device()
     torch.manual_seed(args.seed)
     # train-only augmentation: sigma<=0 (default) is a byte-for-byte no-op,
     # so this wraps unconditionally (see JitterDataset docstring).
@@ -283,7 +309,8 @@ def main() -> None:
         "window": args.window, "channels": args.channels,
         "blocks": args.blocks, "dropout": args.dropout,
         "epochs": args.epochs, "lr": args.lr, "batch": args.batch,
-        "neg_frac": args.neg_frac, "patience": args.patience,
+        "neg_frac": args.neg_frac, "val_neg_frac": val_neg_frac,
+        "patience": args.patience,
         "jitter_sigma": args.jitter_sigma,
         "quality_oversample": args.quality_oversample,
         "quality_top_n": QUALITY_TOP_N,
@@ -298,6 +325,7 @@ def main() -> None:
         "test_start_date": args.test_start_date,
         "val_start_date": args.val_start_date,
         "train_quality_limit": args.train_quality_limit,
+        "device": str(device),
         "git_head": _git_head(),
     }, indent=2))
 

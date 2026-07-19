@@ -26,8 +26,12 @@ from .dataset import apply_scaler, load_scaler, windows_for_all_seconds
 
 
 def pick_device() -> torch.device:
-    return torch.device("mps") if torch.backends.mps.is_available() \
-        else torch.device("cpu")
+    """auto-select: cuda (covers ROCm) > mps > cpu."""
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
 
 
 def _assert_single_day_contiguous_index(idx: pd.Index) -> None:

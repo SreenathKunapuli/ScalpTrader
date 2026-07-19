@@ -25,10 +25,14 @@ run.
    KNOWN HAZARD: the 2025-H1 val window rank-inverted vs test three times —
    demand a val margin beating the best-known val cell before burning the test
    read, and treat small val edges as noise.
-3. Matched-day comparison is the deploy criterion. The deployed baseline on the
-   matched set: maker +$65,581.64 (+2.37¢/sh), taker +$12,330.17 (+0.50¢/sh)
-   from runs/sim_eval/20260718_021932. Deploy only if the candidate beats the
-   maker bar with taker positive ON THE SAME DAYS.
+3. Matched-day comparison is the deploy criterion. Deployed since
+   2026-07-19 (round 7): 26-feature GBT @ thr 0.7
+   (runs/scalper/20260719_112357) — matched-122-day sim taker +$40,930
+   (+7.40¢/sh) / maker +$39,652 (+6.80¢/sh), runs/sim_eval/20260719_120559.
+   A future candidate deploys only if, on the SAME matched days, it beats
+   BOTH legs of that cell, or beats the historical 0.6-maker high-water
+   mark (+$65,582, runs/sim_eval/20260718_021932) with taker positive.
+   Rollback artifact: runs/scalper/20260718_015432 (19-feat @0.6).
 4. Settled facts — do not re-test: vol-scaled barriers (fixed-cent dead);
    timeout-only execution (--exec-stop-mult 1000; nearby stops pay 16–68¢/sh
    gap-through); default HistGradientBoosting HPs (round 1); hard quality
@@ -45,7 +49,7 @@ Standard data flags for every command below (call this BASE):
 `--barrier-mode vol --vol-target-mult 1.0 --vol-stop-mult 0.5 --timeout 120 --test-start-date 2025-06-27`
 
 1. **Baseline** = deployed artifact dir from `.env SCALP_ARTIFACT_DIR`
-   (currently runs/scalper/20260718_015432: 19 features, thr 0.6,
+   (currently runs/scalper/20260719_112357: 26 features, thr 0.7,
    exec_stop_mult 1000, trained on the top-451-quality corpus).
 2. **Candidates** (pick ONE lever per round, 2-4 cells):
    `research/scripts/train_scalper.py BASE --val-start-date 2025-01-01 <lever flags>`

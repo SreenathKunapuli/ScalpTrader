@@ -349,6 +349,44 @@ queue (PC/ROCm per docs/PC_TRAINING_SETUP.md): calibrated inference
 (prior-shift correction baked into TcnProbModel), per-batch jitter, LR
 schedule + longer training, full-corpus data, wider search.
 
+## Feature batch 2 — round 7 (2026-07-19): DEPLOYED at thr 0.7
+
+7 new causal features (commit 338e435, total 26): flow_imb_60s,
+flow_imb_chg, luld_up_dist, round_dist, range_compress, mom_fresh,
+vwap_slope — signed order flow, LULD halt-band proximity, round-number
+magnetism, coiling, momentum freshness. Same top-451 recipe (328 train
+days). Single candidate; one-time test read (runs/scalper/20260719_112357,
+361-day window): thr 0.6 −$42,084 (fires 2× as often — calibration shift
+again); **thr 0.7 +$12,091 (+1.25¢/sh)** — the strongest full-window
+barrier number any candidate posted, on the window where all others bled.
+
+Sim gate (runs/sim_eval/20260719_115237 thr 0.6, 20260719_120559 thr 0.7),
+matched-122-day subset vs deployed:
+
+| config | taker | maker | hostile-239-day total |
+|---|---|---|---|
+| 19-feat @0.6 (was deployed) | +$12,330 (+0.50¢) | **+$65,582** (+2.37¢) | (not simmed) |
+| 19-feat @0.7 | +$18,511 | +$29,783 | (not simmed) |
+| **26-feat @0.7 (NEW DEPLOY)** | **+$40,930 (+7.40¢)** | **+$39,652 (+6.80¢)** | taker +$67 / maker +$9,680 |
+| 26-feat @0.6 | +$14,147 | +$51,685 | taker −$60,918 / maker −$14,096 |
+
+Deployment decision — the formal 0.6-maker bar (+$65.6k) was NOT beaten;
+the 26-feat @0.7 cell was deployed anyway on explicit judgment grounds,
+recorded here: (a) its WORST leg (+$39.7k) is 3.2× the old config's worst
+leg (+$12.3k), and the old +$65.6k ceiling sits entirely in the maker
+leg — the number most fragile to live queue-position reality; (b) both
+legs agree (~$40k), so the result is robust to fill-mode uncertainty;
+(c) it is the only candidate ever to be non-negative on the hostile
+239-day tier — regime robustness; (d) ~7¢/sh expectancy at 4.7 trades/day
+(hit 17.8% barrier / ~25% sim target rate); (e) the thr-0.7 preference
+was pre-registered in round 6's conclusion before this round ran.
+**Selection-bias caveat: cells were compared across thresholds and
+feature sets; Monday paper trading must reproduce this cell's edge per
+docs/LIVE_PROMOTION.md before any live trust. Rollback = flip
+SCALP_ARTIFACT_DIR back to runs/scalper/20260718_015432.**
+Artifact: runs/scalper/20260719_112357 (model fit on all top-451 days,
+26 features, threshold 0.7, exec_stop_mult 1000).
+
 ## Scanner ranker (which stocks to watch)
 
 8 morning-observable features (gap, prev-day liquidity, first-15-min tape;

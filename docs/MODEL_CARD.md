@@ -280,6 +280,39 @@ protocol — remaining levers are new features, probability calibration
 rung on the now-1,250-day corpus, and paper-trading evidence (Phase 5),
 which is the next validation layer regardless.
 
+## Quality-weighted training — round 6 (2026-07-18): no deploy
+
+New `--quality-weight-mult` flag (commit 205202a) multiplies sample weights
+of top-451-quality-day rows during full-corpus (887 train days) training —
+the soft version of round 4's hard curation. Candidates M ∈ {2,4,8} judged
+on the identical 138 val days (2025-01-03..2025-06-24), thr-0.6 / thr-0.7
+val sum PnL @1000sh:
+
+| mult | thr-0.6 val | thr-0.7 val | artifact |
+|---|---|---|---|
+| M=2 | +$1,474 | +$10,369 | runs/scalper/20260718_181622 |
+| M=4 | **+$6,611** (selected) | +$13,265 | runs/scalper/20260718_183427 |
+| M=8 | +$5,733 | +$11,491 | runs/scalper/20260718_185029 |
+
+M=4 beat the +$3,739 earn-a-test-read bar.
+
+One-time test read of M=4 (runs/scalper/20260718_190713, 887 train days,
+361-day pinned window): thr 0.6 hit 13.7%, expectancy −0.67¢/sh, sum PnL
+**−$37,613**; thr 0.7 +$6,313. FOURTH consecutive val→test transfer failure
+at thr 0.6. Full-corpus variants now cluster: unweighted −$29,463 (round 2),
+top-800 −$34,191 (round 4), M=4 weighted −$37,613 (round 6) — all far below
+the deployed model's behavior on matched days.
+
+Sim gate not run (pre-deploy gate; no deploy possible — round 4's model with
+a better test read reached only +$41.5k matched maker vs the +$65.6k bar).
+Verdict: FAILED, deployed artifact unchanged. Quality-weighting lever
+exhausted.
+
+One robust signal worth recording: thr 0.7 was positive on BOTH val and test
+in every quality-weight cell — high-precision operating points transfer better
+across training variants than thr 0.6; the TCN gate (round 5) evaluates both
+thresholds for this reason.
+
 ## Scanner ranker (which stocks to watch)
 
 8 morning-observable features (gap, prev-day liquidity, first-15-min tape;

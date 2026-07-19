@@ -313,6 +313,42 @@ in every quality-weight cell — high-precision operating points transfer better
 across training variants than thr 0.6; the TCN gate (round 5) evaluates both
 thresholds for this reason.
 
+## TCN deep rung v1 — round 5 (2026-07-19): pulse detected, not promoted
+
+First sequence model: causal TCN (64ch × 4 blocks) over 240s × 26-feature
+windows, triple-barrier labels, top-451-quality training days (329), val
+2025-01+ for early stopping only. Build hardened by adversarial review
+(2 catches: train/serve population mismatch, cross-day window guard —
+commits f59d31a/349089e/60993de/6401a62). Trained on MPS, 912,421 windows
+(neg-frac 0.12); best val AP 0.394 vs 0.26 base at epoch 0 (never improved
+after — undertrained recipe). Jitter-augmentation runs OOM'd (full-dataset
+noise tensor design flaw; per-batch fix queued). Artifact:
+runs/tcn/20260719_002006.
+
+Calibration lesson at full volume: class rebalancing (subsampling +
+pos_weight) inflates the TCN's probabilities ~20× vs the GBT's scale —
+nominal thr 0.6 selects 1.83M attempts (top ~22% of all seconds) and loses
+−$244k maker (runs/sim_eval/20260719_102616; thr 0.7: −$106k,
+20260719_104443). Nominal thresholds are meaningless across differently
+weighted models; the honest comparison is MATCHED SELECTIVITY (equal
+attempt counts), via the probability-quantile scan: TCN 0.8383 ≈ GBT-0.6
+selectivity (38k attempts), TCN 0.9375 ≈ GBT-0.7 (6.7k).
+
+| matched 122 days | taker | maker | artifact |
+|---|---|---|---|
+| GBT thr 0.6 (deployed) | +$12,330 | **+$65,582** | 20260718_021932 |
+| TCN @0.8383 | −$448 | +$2,717 | runs/sim_eval/20260719_111217 |
+| GBT thr 0.7 | +$18,511 | +$29,783 | 20260718_020553 |
+| TCN @0.9375 | +$1,605 | +$1,567 | runs/sim_eval/20260719_112305 |
+
+Verdict: NOT PROMOTED — but the top slices are net-positive in the sim
+(both modes at 0.7-selectivity), i.e. the architecture ranks its best
+seconds profitably on first attempt with 329 training days. Ladder rule
+holds: deep rung promotes only if it beats the GBT net of sim. Scale-up
+queue (PC/ROCm per docs/PC_TRAINING_SETUP.md): calibrated inference
+(prior-shift correction baked into TcnProbModel), per-batch jitter, LR
+schedule + longer training, full-corpus data, wider search.
+
 ## Scanner ranker (which stocks to watch)
 
 8 morning-observable features (gap, prev-day liquidity, first-15-min tape;

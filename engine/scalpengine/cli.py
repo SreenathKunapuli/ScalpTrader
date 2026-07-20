@@ -139,7 +139,8 @@ async def _day_scanner(engine: "Engine", stream: "MarketStream",
                     engine.expand_universe(candidates)
                     dynamic_added.extend(candidates)
                     engine.state.last_data_ts = dt.datetime.now(dt.timezone.utc)
-                    stream.update_symbols(engine._live_universe)
+                    stream.update_symbols(engine._live_universe,
+                                         context=set(tier.universe))
                     log.info("day_scanner.morning_done", added=len(candidates),
                              top5=candidates[:5],
                              universe=len(engine._live_universe))
@@ -205,7 +206,7 @@ async def _day_scanner(engine: "Engine", stream: "MarketStream",
         # Reset staleness clock before reconnect so the monitor doesn't fire
         # during the few seconds the stream is tearing down and rebuilding.
         engine.state.last_data_ts = dt.datetime.now(dt.timezone.utc)
-        stream.update_symbols(engine._live_universe)
+        stream.update_symbols(engine._live_universe, context=set(tier.universe))
         log.info("day_scanner.intraday_done",
                  added=new_candidates, evicted=evict,
                  universe=len(engine._live_universe))
@@ -388,7 +389,8 @@ async def _run(tier_name: str) -> None:
     engine.warmup(history)
 
     stream = MarketStream(s.alpaca_api_key, s.alpaca_secret_key, tier.universe,
-                          engine.on_trade, engine.on_quote, engine.on_stream_bar)
+                          engine.on_trade, engine.on_quote, engine.on_stream_bar,
+                          context=set(tier.universe))
 
     trade_stream = TradeUpdateStream(s.alpaca_api_key, s.alpaca_secret_key,
                                      paper=True, on_fill=make_fill_handler(engine, om))

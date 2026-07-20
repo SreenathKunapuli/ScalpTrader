@@ -33,18 +33,46 @@ BarHandler = Callable[[str, datetime, float, float, float, float, int, float, in
 SUBSCRIPTION_LIMIT = 30
 
 
-def plan_subscriptions(symbols: list[str], limit: int = SUBSCRIPTION_LIMIT
-                       ) -> tuple[list[str], list[str], list[str]]:
-    """Allocate the budget: bars for all, then quotes, then trades."""
-    n = len(symbols)
-    if n > limit:
-        symbols = symbols[:limit]
-        n = limit
-    remaining = limit - n
-    quotes = symbols[: min(n, remaining)]
-    remaining -= len(quotes)
-    trades = symbols[: min(n, remaining)]
-    return symbols, quotes, trades
+def plan_subscriptions(
+    symbols: list[str],
+    limit: int = SUBSCRIPTION_LIMIT,
+    context: set[str] | None = None,
+) -> tuple[list[str], list[str], list[str]]:
+    """Allocate subscription budget with full packages for scalpable symbols.
+
+    Priority rules:
+    - Context symbols (market-context seeds like SPY/QQQ) receive bars only,
+      and only from leftover budget after scalpable packages are allocated.
+    - Non-context ("scalpable") symbols each cost 3 budget units: bar + quote
+      + trade.  K = min(n_scalpable, limit // 3) full packages are granted in
+      the order given.
+    - Leftover budget after K packages goes first to bars for context symbols,
+      then to bars for remaining scalpable symbols (breadth, no microstructure).
+
+    Returns (bar_syms, quote_syms, trade_syms) — same structure as before.
+    """
+    ctx: set[str] = context if context is not None else set()
+
+    # Partition: preserve original order for scalpable symbols.
+    scalpable = [s for s in symbols if s not in ctx]
+    context_list = [s for s in symbols if s in ctx]
+
+    # How many full packages fit?
+    k = min(len(scalpable), limit // 3)
+    full_pkg = scalpable[:k]
+    budget_used = k * 3
+
+    bar_syms: list[str] = list(full_pkg)
+    quote_syms: list[str] = list(full_pkg)
+    trade_syms: list[str] = list(full_pkg)
+
+    # Distribute leftover budget: bars only, context first then remaining scalpable.
+    leftover = limit - budget_used
+    bar_only_candidates = context_list + scalpable[k:]
+    extra_bars = bar_only_candidates[:leftover]
+    bar_syms.extend(extra_bars)
+
+    return bar_syms, quote_syms, trade_syms
 
 
 class MarketStream:
@@ -56,8 +84,10 @@ class MarketStream:
         on_trade: TradeHandler,
         on_quote: QuoteHandler,
         on_bar: BarHandler,
+        context: set[str] | None = None,
     ) -> None:
         self.symbols = list(symbols)
+        self._context: set[str] = context if context is not None else set()
         self.on_trade = on_trade
         self.on_quote = on_quote
         self.on_bar = on_bar
@@ -67,13 +97,18 @@ class MarketStream:
         self._stop = asyncio.Event()
         self._reconnect = asyncio.Event()  # set by update_symbols() to trigger reconnect
 
-    def update_symbols(self, new_symbols: list[str]) -> None:
+    def update_symbols(self, new_symbols: list[str],
+                       context: set[str] | None = None) -> None:
         """Swap in a new symbol list and trigger a stream reconnect.
 
         The current connection is torn down cleanly; run_forever() immediately
-        re-connects with the updated subscription plan.
+        re-connects with the updated subscription plan.  Pass context to tag
+        market-context seed symbols (e.g. SPY/QQQ) so they receive bars-only
+        from leftover budget rather than consuming full bar+quote+trade packages.
         """
         self.symbols = list(new_symbols)
+        if context is not None:
+            self._context = context
         self._reconnect.set()
 
     async def _handle_trade(self, t: Any) -> None:
@@ -106,7 +141,8 @@ class MarketStream:
         active_stream: Any = None
         while not self._stop.is_set():
             self._reconnect.clear()
-            bar_syms, quote_syms, trade_syms = plan_subscriptions(self.symbols)
+            bar_syms, quote_syms, trade_syms = plan_subscriptions(
+                self.symbols, context=self._context)
             try:
                 active_stream = StockDataStream(self._api_key, self._secret_key)
                 active_stream.subscribe_bars(self._handle_bar, *bar_syms)

@@ -28,12 +28,24 @@ TRAIN_ARGS = [
 ]
 
 WORK.mkdir(parents=True, exist_ok=True)
-with zipfile.ZipFile(DATASET / "code.zip") as z:
-    z.extractall(WORK)
+# Kaggle auto-extracts uploaded zips — handle both layouts
+if (DATASET / "code.zip").exists():
+    with zipfile.ZipFile(DATASET / "code.zip") as z:
+        z.extractall(WORK)
+elif (DATASET / "research").exists():
+    shutil.copytree(DATASET / "research", WORK / "research", dirs_exist_ok=True)
+else:  # code.zip extracted into a code/ folder
+    shutil.copytree(DATASET / "code" / "research", WORK / "research",
+                    dirs_exist_ok=True)
 (WORK / "data").mkdir(exist_ok=True)
-if not (WORK / "data/corpus").exists():
+corpus_src = next(p for p in [DATASET / "corpus", DATASET / "corpus.zip"]
+                  if p.exists())
+if corpus_src.suffix == ".zip":
+    with zipfile.ZipFile(corpus_src) as z:
+        z.extractall(WORK / "data")
+elif not (WORK / "data/corpus").exists():
     # symlink keeps the read-only dataset in place; scripts only read it
-    (WORK / "data/corpus").symlink_to(DATASET / "corpus")
+    (WORK / "data/corpus").symlink_to(corpus_src)
 
 r = subprocess.run(
     [sys.executable, str(WORK / "research/scripts/train_tcn.py"), *TRAIN_ARGS],

@@ -14,18 +14,24 @@ from pathlib import Path
 DATASET = Path("/kaggle/input/scalptrader-corpus")
 WORK = Path("/kaggle/working/ScalpTrader")
 
-TRAIN_ARGS = [
+BASE_ARGS = [
     "--barrier-mode", "vol", "--vol-target-mult", "1.0",
     "--vol-stop-mult", "0.5", "--timeout", "120",
     "--test-start-date", "2025-06-27",
-    "--train-quality-limit", "451",
     "--val-start-date", "2025-01-01",
     "--device", "auto",            # resolves to cuda on Kaggle
     "--window", "240", "--channels", "64", "--blocks", "4",
     "--epochs", "40", "--patience", "6", "--lr", "1e-3",
+    "--lr-schedule", "cosine", "--jitter-sigma", "0.05",
     "--batch", "512", "--neg-frac", "0.06", "--val-neg-frac", "0.06",
-    "--jitter-sigma", "0.0",
+    "--window-store", "disk",
 ]
+# wave 2: v8 overfit from epoch 1 -> regularize (cosine+jitter) and test
+# whether 4x data beats quality curation for the deep rung
+ARMS = {
+    "top451_reg": ["--train-quality-limit", "451"],
+    "full1250_reg": [],
+}
 
 import psutil
 print(f"RAM: {psutil.virtual_memory().total / 1e9:.1f} GB")
@@ -56,14 +62,17 @@ elif not (WORK / "data/corpus").exists():
     # symlink keeps the read-only dataset in place; scripts only read it
     (WORK / "data/corpus").symlink_to(corpus_src)
 
-r = subprocess.run(
-    [sys.executable, str(WORK / "research/scripts/train_tcn.py"), *TRAIN_ARGS],
-    cwd=WORK)
-print("train exit:", r.returncode)
-
-runs = sorted((WORK / "runs/tcn").glob("*"))
-if runs:
-    dest = Path("/kaggle/working/tcn_artifact")
-    shutil.copytree(runs[-1], dest, dirs_exist_ok=True)
-    print("artifact ->", dest, list(p.name for p in dest.iterdir()))
-sys.exit(r.returncode)
+worst = 0
+for name, extra in ARMS.items():
+    print(f"===== ARM {name} =====", flush=True)
+    r = subprocess.run(
+        [sys.executable, str(WORK / "research/scripts/train_tcn.py"),
+         *BASE_ARGS, *extra], cwd=WORK)
+    print(f"arm {name} exit: {r.returncode}", flush=True)
+    worst = max(worst, r.returncode)
+    runs = sorted((WORK / "runs/tcn").glob("*"))
+    if runs:
+        dest = Path(f"/kaggle/working/tcn_{name}")
+        shutil.copytree(runs[-1], dest, dirs_exist_ok=True)
+        print("artifact ->", dest, [p.name for p in dest.iterdir()])
+sys.exit(worst)

@@ -24,6 +24,30 @@ installers.
 
 ---
 
+## Part 0 — Windows 10? Upgrade first (hard requirement)
+
+**Every AMD ROCm path for the 9070 XT requires Windows 11** — verified
+against AMD's official matrices (July 2026): the WSL2 route needs the
+Adrenalin 26.1.1+ WSL driver stack (Windows 11), and AMD's native-Windows
+PyTorch preview lists RX 9070 XT under Windows 11 only. Mainline
+pytorch.org ships no Windows ROCm at all. On Windows 10 nothing works —
+do not burn time trying. (Windows 10 is also out of security support
+since Oct 2025 — a bad host for an SSH-exposed machine.)
+
+Fix: the free in-place upgrade — no dual boot, keeps files/apps/games:
+1. Eligibility: run PC Health Check — https://aka.ms/GetPCHealthCheckApp.
+   Common blockers are BIOS toggles, not hardware: enable TPM 2.0
+   ("fTPM" on AMD boards / "PTT" on Intel) and Secure Boot.
+2. Upgrade via Windows Update, or the Installation Assistant:
+   https://www.microsoft.com/software-download/windows11 (~1 hour).
+3. Then continue with Part A below.
+
+Last resorts if Windows 11 is truly impossible: torch-directml on
+Windows 10 (slow, stale PyTorch — barely worth it) or hourly cloud GPU
+rental for training runs.
+
+---
+
 ## Part A — Prepare Windows (15 min)
 
 **What**: WSL2 GPU compute requires a recent AMD driver on the Windows side.
@@ -56,8 +80,7 @@ risk to your Windows install, uninstallable any time.
    prompt shows nothing while you type, that's normal).
 4. You now have a Linux prompt like `you@PCNAME:~$`. Later you can reopen it
    any time: press `Win`, type "Ubuntu", open the app.
-5. Update it (Linux's equivalent of Windows Update; run in the Ubuntu
-   window):
+5. Update it (Linux's equivalent of Windows Update; run 
    ```bash
    sudo apt update && sudo apt upgrade -y
    ```

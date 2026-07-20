@@ -1,0 +1,98 @@
+diff --git a/research/scalp/bars_features.py b/research/scalp/bars_features.py
+index ac23c3d..ca188af 100644
+--- a/research/scalp/bars_features.py
++++ b/research/scalp/bars_features.py
+@@ -164,10 +164,22 @@ def build_features(
+     out["flow_imb_chg"] = out["flow_imb_60s"] - out["flow_imb_60s"].shift(30)
+ 
+     # ------------------------------------------------------------------
+-    # LULD-up proximity: distance to an approximate upper limit-up band
++    # LULD-up proximity: distance to tier-aware upper limit-up band
++    # Tier-2 LULD bands (SEC Rule 201 / LULD Plan):
++    #   reference >= $3.00  -> band = reference * 1.10
++    #   $0.75 <= ref < $3.00 -> band = reference * 1.20
++    #   ref < $0.75          -> band = reference + min(0.15, 0.75 * reference)
+     # ------------------------------------------------------------------
+     luld_ref = px.rolling(300, min_periods=30).mean()
+-    luld_band = luld_ref * 1.10
++    ref_arr = luld_ref.to_numpy()
++    luld_band_arr = np.select(
++        [ref_arr >= 3.00,
++         ref_arr >= 0.75],
++        [ref_arr * 1.10,
++         ref_arr * 1.20],
++        default=ref_arr + np.minimum(0.15, 0.75 * ref_arr),
++    )
++    luld_band = pd.Series(luld_band_arr, index=px.index)
+     with np.errstate(invalid="ignore", divide="ignore"):
+         out["luld_up_dist"] = (luld_band - px) / px.replace(0, np.nan)
+ 
+@@ -201,6 +213,68 @@ def build_features(
+     # ------------------------------------------------------------------
+     out["vwap_slope"] = out["vwap_dist"] - out["vwap_dist"].shift(60)
+ 
++    # ------------------------------------------------------------------
++    # Quote-based order-flow imbalance (Cont-Kukanov-Stoikov 2013)
++    # arxiv 1011.6402: per-second event e_t from NBBO bid/ask level changes
++    #   Bid contribution:
++    #     bid_t > bid_{t-1}  ->  +bid_size_t
++    #     bid_t == bid_{t-1} ->  +(bid_size_t - bid_size_{t-1})
++    #     bid_t < bid_{t-1}  ->  -bid_size_{t-1}
++    #   Ask contribution (subtracted, sign flipped for ask side):
++    #     ask_t < ask_{t-1}  ->  +ask_size_{t-1}   (ask down = buy pressure)
++    #     ask_t == ask_{t-1} ->  +(ask_size_{t-1} - ask_size_t)
++    #     ask_t > ask_{t-1}  ->  -ask_size_t        (ask up = sell pressure)
++    #   e_t = bid_contrib - ask_contrib
++    # ofi_60s = rolling 60s sum(e_t) / rolling 60s mean(bid_size + ask_size)
++    # ------------------------------------------------------------------
++    bid = bars["bid"]
++    ask = bars["ask"]
++    bid_sz = bars["bid_size"]
++    ask_sz = bars["ask_size"]
++    bid_lag = bid.shift(1)
++    ask_lag = ask.shift(1)
++    bid_sz_lag = bid_sz.shift(1)
++    ask_sz_lag = ask_sz.shift(1)
++
++    bid_contrib = np.select(
++        [bid > bid_lag, bid == bid_lag],
++        [bid_sz, bid_sz - bid_sz_lag],
++        default=-bid_sz_lag,
++    )
++    ask_contrib = np.select(
++        [ask < ask_lag, ask == ask_lag],
++        [ask_sz_lag, ask_sz_lag - ask_sz],
++        default=-ask_sz,
++    )
++    ofi_event = pd.Series(bid_contrib - ask_contrib, index=bars.index)
++
++    depth = bid_sz + ask_sz
++    ofi_sum_60 = ofi_event.rolling(60, min_periods=1).sum()
++    depth_mean_60 = depth.rolling(60, min_periods=1).mean()
++    with np.errstate(invalid="ignore", divide="ignore"):
++        out["ofi_60s"] = ofi_sum_60 / depth_mean_60.replace(0, np.nan)
++
++    # ------------------------------------------------------------------
++    # Tick-count imbalance proxy (trade-count weighted direction)
++    # tick_imb_60s = rolling 60s sum(sign(close.diff()) * n_trades)
++    #                / rolling 60s sum(n_trades)   in [-1, 1]
++    # ------------------------------------------------------------------
++    tick_dir = np.sign(px.diff()) * bars["n_trades"]
++    tick_sum_60 = tick_dir.rolling(60, min_periods=1).sum()
++    ntrades_sum_60 = bars["n_trades"].rolling(60, min_periods=1).sum()
++    with np.errstate(invalid="ignore", divide="ignore"):
++        out["tick_imb_60s"] = tick_sum_60 / ntrades_sum_60.replace(0, np.nan)
++
++    # ------------------------------------------------------------------
++    # Quote-imbalance persistence: consecutive seconds with qimb > 0.6
++    # (mirroring up_streak pattern; capped at 120 s, scaled /120)
++    # ------------------------------------------------------------------
++    high_qimb = (qimb > 0.6).astype(float)
++    grp_qi = (high_qimb == 0).cumsum()
++    out["qimb_persist"] = (
++        high_qimb.groupby(grp_qi).cumsum().clip(upper=120) / 120.0
++    )
++
+     # ------------------------------------------------------------------
+     # Quote validity flag
+     # ------------------------------------------------------------------

@@ -79,6 +79,25 @@ class Repo:
             s.add(row)
             s.commit()
 
+    def set_order_status(self, client_order_id: str, status: str) -> None:
+        """Update an existing order row's status; unknown coids are ignored
+        (a broker-side order we never recorded is not ours to invent)."""
+        with self.session() as s:
+            row = s.scalar(select(Order).where(Order.client_order_id == client_order_id))
+            if row is not None:
+                row.status = status
+                s.commit()
+
+    def record_order_fill(self, client_order_id: str, qty: int, price: float) -> None:
+        with self.session() as s:
+            row = s.scalar(select(Order).where(Order.client_order_id == client_order_id))
+            if row is None:
+                return
+            row.filled_qty = (row.filled_qty or 0) + qty
+            row.fill_price = price
+            row.status = "filled" if row.filled_qty >= row.qty else "partially_filled"
+            s.commit()
+
     def add_trade(self, **fields: Any) -> None:
         with self.session() as s:
             s.add(Trade(**fields))

@@ -147,3 +147,33 @@ async def test_trailing_stop_advances_and_locks_gain(state, repo, mock_broker) -
 
     await engine.rebalance(now)
     assert state.positions["AAPL"].stop_price >= new_stop, "stop must never retreat"
+
+
+class _StrongCandidate:
+    """Ensemble result stub: always a maximally confident candidate."""
+
+    final_score = 0.9
+    per_signal: dict = {}
+    vol_mult = 1.0
+
+    def is_candidate(self, tier) -> bool:  # type: ignore[no-untyped-def]
+        return True
+
+
+async def test_ensemble_never_trades_when_scalp_model_wired(state, repo, mock_broker) -> None:  # type: ignore[no-untyped-def]
+    """Live 2026-07-20: the minute-bar ensemble re-pegged into a runaway ADVB
+    spread on an unvalidated z-score signal (-$6.78). With a scalp model wired,
+    rebalance() must be telemetry-only — no entries, ever."""
+    engine, om = make_engine(state, repo, mock_broker)
+    for sym in engine._live_universe:
+        engine.bars_5m[sym].extend(synth_bars(sym, 40, SESSION_OPEN))
+        mock_broker.price[sym] = engine.bars_5m[sym][-1].close
+    engine.ensemble.compute = lambda s, b, t: _StrongCandidate()  # type: ignore[method-assign]
+
+    engine.scalp_signal = object()  # sentinel: model wired
+    await engine.rebalance(SESSION_OPEN + timedelta(hours=2))
+    assert not mock_broker.submitted, "ensemble must not trade the scalp book"
+
+    engine.scalp_signal = None  # control: same signals DO trade without a model
+    await engine.rebalance(SESSION_OPEN + timedelta(hours=2))
+    assert mock_broker.submitted

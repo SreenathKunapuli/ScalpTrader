@@ -255,6 +255,13 @@ class Engine:
             await self.pubsub.publish("signals", {
                 "symbol": symbol, "ensemble": res.final_score,
                 "per_signal": res.per_signal, "ts": now.isoformat()})
+            if self.scalp_signal is not None:
+                # Scalp-only book: the minute-bar ensemble is telemetry, never
+                # a trader. Live 2026-07-20: it re-pegged into a runaway ADVB
+                # spread twice (-$6.78, 85% of day loss) on a z-score signal
+                # never validated for runners. Entries AND signal-exits are cut
+                # (a signal-exit would fight the bracket that owns each scalp).
+                continue
             if not res.is_candidate(self.tier):
                 # candidate exit: existing position whose signal died
                 await self._maybe_exit_on_signal(symbol, bars, res.final_score)
@@ -399,9 +406,21 @@ class Engine:
         scalp model strike. Inert unless cli wired a model artifact."""
         if self.scalp_signal is None or self.scalp_cfg is None:
             return
+        # per-symbol eval telemetry: [evals, max_p, n_ge_thr, n_qty0], flushed
+        # every 60s — the decision path's silent exits (p<thr, qty=0) were
+        # invisible on 2026-07-20 and cost a day of debugging
+        self._scalp_stats: dict[str, list[float]] = {}
+        last_flush = datetime.now(UTC)
         while True:
             await asyncio.sleep(0.25)
             now = datetime.now(UTC)
+            if (now - last_flush).total_seconds() >= 60 and self._scalp_stats:
+                log.info("scalp.telemetry", window_s=60, stats={
+                    s: {"evals": int(v[0]), "max_p": round(v[1], 3),
+                        "ge_thr": int(v[2]), "qty0": int(v[3])}
+                    for s, v in sorted(self._scalp_stats.items())})
+                self._scalp_stats = {}
+                last_flush = now
             finalized = self.second_bars.poll(now)
             if not finalized:
                 continue
@@ -422,6 +441,13 @@ class Engine:
             return  # one scalp per symbol; entry already working
         frame = self.second_bars.get_frame(symbol)
         dec = self.scalp_signal.compute_second(symbol, frame)
+        stats = getattr(self, "_scalp_stats", None)
+        if stats is not None and dec is not None:
+            st = stats.setdefault(symbol, [0, 0.0, 0, 0])
+            st[0] += 1
+            st[1] = max(st[1], dec.p_win)
+            if dec.p_win >= self.scalp_signal.threshold:
+                st[2] += 1
         if dec is None or dec.p_win < self.scalp_signal.threshold:
             return
         last = frame.iloc[-1]
@@ -436,6 +462,14 @@ class Engine:
                          else 0.0,
                          self.scalp_cfg)
         if qty <= 0:
+            # above-threshold signal zeroed by the sizing box — rare and worth
+            # a line each time (participation/depth caps starve on thin tape)
+            if stats is not None:
+                stats.setdefault(symbol, [0, 0.0, 0, 0])[3] += 1
+            log.info("scalp.qty_zero", symbol=symbol, p_win=round(dec.p_win, 3),
+                     px=price, vol_60s=float(frame["volume"].iloc[-60:].sum()),
+                     ask_size=float(last["ask_size"])
+                     if pd.notna(last["ask_size"]) else 0.0)
             return
         intent = OrderIntent(symbol=symbol, side="buy", qty=qty,
                              price_hint=price, reason="scalp")

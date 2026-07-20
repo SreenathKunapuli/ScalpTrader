@@ -224,6 +224,7 @@ def make_fill_handler(engine: "Engine", om: "OrderManager"):  # type: ignore[no-
 
     async def _on_fill_event(symbol: str, side: str, qty: int, price: float,
                              coid: str) -> None:
+        engine.repo.record_order_fill(coid, qty, price)
         if is_target_coid(coid):
             om.on_fill(symbol, side, qty, price, reason="target", book="intraday")
             engine.brackets.on_target_fill(symbol)

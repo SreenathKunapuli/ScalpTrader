@@ -419,3 +419,40 @@ live path: `engine/scalpengine/scanner/live_scan.py`, invoked at 10:01 ET
   viability label set grows.
 - Sizing head (capped Kelly, `research/scalp/sizing.py`) is validated by
   property tests, not yet by sim-with-sizing (sim uses fixed 1000sh clip).
+
+## First live paper session — 2026-07-20 ($5k account)
+
+The deployed 26f/thr-0.6 model made its first real trades: 3 ATAI scalps
+(15:32–15:40 ET), each the full designed lifecycle — maker entry, one
+re-peg, fill, bracket target, 120s timeout exit. Net -$1.19 (each trade
+paid ~1 tick on a pinned 7.18/7.19 spread). Sizing was participation-
+capped (5% of a thin 3:30pm tape → 69/20/30 shares), working as designed.
+
+Five integration bugs found and fixed only by going live:
+1. plan_subscriptions gave runner symbols no trade subscription →
+   SecondBarBuilder never initialized → scalp path structurally dead
+   (fixed 7b77f0d: full bar+quote+trade packages, K=limit//3).
+2. Legacy 20-name universe ate 20/30 stream slots (tiers trim 56cdb04).
+3. Leftover LOB minute-bar ensemble was still a live trader: re-pegged
+   into a runaway ADVB spread twice (bought +12% and +11% spikes on a
+   mean-reversion z-score never validated for runners), -$6.78 = 85% of
+   the day's loss. Now telemetry-only whenever a scalp model is wired
+   (engine.rebalance guard + regression test).
+4. Order rows never left `pending_new`: local cancels and stream fills
+   didn't write back (repo.set_order_status / record_order_fill added).
+5. Intraday screener 404: Alpaca route is `most-actives` (hyphen);
+   response key keeps the underscore.
+
+**Feed parity (the finding that outranks everything):** offline replay of
+the session, same model, same seconds, 15:10–15:50 ET window —
+SIP-built bars: ADVB 196 / CDNA 561 / IONZ 189 / ATAI 1024 would-enter
+seconds. IEX-built bars: 0 / 0 / 0 / 115. IEX carried 0.3–7% of SIP
+ticks on these runners. The model is trained on the full SIP tape and is
+near-blind on the free IEX shadow — ATAI, the one symbol whose IEX view
+retained signal, is exactly the one symbol it traded. Mid-session frame
+anchoring measured negligible (IEX-full vs IEX-truncated ≈ equal), so
+the feed, not the restart, is the whole story. Consequence: paper PnL on
+free data cannot measure the model; the 0.6-vs-0.7 threshold experiment
+is starved. Decision pending (user): Alpaca Algo Trader Plus ($99/mo
+real-time SIP) vs retrain-on-IEX-bars vs accept the handicap.
+Repro: /tmp/iex_parity.py → /tmp/iex_parity_results.json.

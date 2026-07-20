@@ -7,7 +7,7 @@ mean-reversion can trade.
 
 Alpaca v1beta1 endpoints used (Basic/free plan):
   GET /v1beta1/screener/stocks/movers        → gainers[] + losers[]
-  GET /v1beta1/screener/stocks/most_actives  → most_actives[]
+  GET /v1beta1/screener/stocks/most-actives  → most_actives[]
 Each item contains at minimum: symbol, price, percent_change, volume.
 """
 
@@ -66,7 +66,9 @@ def scan_candidates(
     except Exception as exc:
         log.warning("screener.movers_failed", error=str(exc))
     try:
-        data = _get("most_actives", api_key, secret_key,
+        # endpoint path is hyphenated (most_actives 404s); the RESPONSE key
+        # keeps the underscore — verified live 2026-07-20
+        data = _get("most-actives", api_key, secret_key,
                     params={"by": "volume", "top": 25})
         actives_raw = data.get("most_actives", [])
     except Exception as exc:

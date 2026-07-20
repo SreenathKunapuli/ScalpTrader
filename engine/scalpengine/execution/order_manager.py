@@ -132,6 +132,7 @@ class OrderManager:
             if live is None:
                 return  # filled or already cancelled
             await self._broker.cancel_order(order.id)
+            self.repo.set_order_status(order.client_order_id, "canceled")
             remaining = live.qty - live.filled_qty
             if remaining <= 0:
                 return
@@ -156,6 +157,7 @@ class OrderManager:
             if live is None:
                 return
             await self._broker.cancel_order(order.id)
+            self.repo.set_order_status(order.client_order_id, "canceled")
             log.info("order.entry_expired", symbol=order.symbol,
                      unfilled=live.qty - live.filled_qty)
         except Exception as exc:
@@ -172,6 +174,7 @@ class OrderManager:
             if live is None:
                 return  # filled or already cancelled
             await self._broker.cancel_order(order.id)
+            self.repo.set_order_status(order.client_order_id, "canceled")
             remaining = live.qty - live.filled_qty
             if remaining <= 0:
                 return

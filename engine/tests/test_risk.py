@@ -12,10 +12,7 @@ from scalpengine.risk.risk_manager import Approval, OrderIntent, Rejection, Risk
 from scalpengine.risk.sizing import size_position
 from scalpengine.risk.state import Position
 
-from .conftest import IN_SESSION
-
-MED = TIERS[Tier.MEDIUM]
-HIGH = TIERS[Tier.HIGH]
+from .conftest import IN_SESSION, HIGH_WIDE as HIGH, MED_WIDE as MED
 
 
 # ---------- sizing ---------- #
@@ -177,12 +174,13 @@ def test_scalp_per_symbol_cap_still_allows_exit(state) -> None:  # type: ignore[
 def test_scalp_max_open_scalps_rejects_new_symbol(state) -> None:  # type: ignore[no-untyped-def]
     rm = _scalp_rm(state)
     # SCALP_LARGE.max_open_scalps = 5; fill the intraday book with 5 names
-    for sym in MED.universe[:5]:
+    # (universe[5:10] — the AAPL intent below must be a NEW sixth symbol)
+    for sym in MED.universe[5:10]:
         state.positions[sym] = Position(symbol=sym, qty=1, entry_price=5.0, mark=5.0)
     r = rm.approve(_intent(symbol="AAPL", price=5.0, qty=1), IN_SESSION)
     assert isinstance(r, Rejection) and "max concurrent scalps" in r.reason
     # adding to an EXISTING scalp symbol is not a new scalp -> allowed
-    ok = rm.approve(_intent(symbol=MED.universe[0], price=5.0, qty=1), IN_SESSION)
+    ok = rm.approve(_intent(symbol=MED.universe[5], price=5.0, qty=1), IN_SESSION)
     assert isinstance(ok, Approval)
 
 

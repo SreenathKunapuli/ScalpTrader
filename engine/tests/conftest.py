@@ -4,13 +4,27 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import dataclasses
+
 import pytest
+from scalpengine.config.tiers import TIERS, Tier
 from scalpengine.execution.broker import BrokerOrder
 from scalpengine.persistence.repo import Repo
 from scalpengine.risk.state import PortfolioState
 
 # A known regular NYSE session: Monday 2026-06-15, 15:00 UTC = 11:00 ET.
 IN_SESSION = datetime(2026, 6, 15, 15, 0, tzinfo=UTC)
+
+# Production universes shrank to context-only (SPY/QQQ) when the scalper took
+# the stream budget (tiers.py). Risk-branch tests need a wide universe with a
+# stable symbol cast — same limits, test-only universe.
+_TEST_UNIVERSE = [
+    "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "AMD", "NFLX",
+    "AVGO", "JPM", "V", "UNH", "XOM", "COST", "SPY", "QQQ", "IWM", "DIA",
+    "XLK",
+]
+MED_WIDE = dataclasses.replace(TIERS[Tier.MEDIUM], universe=_TEST_UNIVERSE)
+HIGH_WIDE = dataclasses.replace(TIERS[Tier.HIGH], universe=_TEST_UNIVERSE)
 
 
 @pytest.fixture

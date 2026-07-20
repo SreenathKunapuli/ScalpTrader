@@ -5,13 +5,12 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from scalpengine.config.tiers import TIERS, Tier
 from scalpengine.data.bar_builder import BarBuilder, aggregate
 from scalpengine.execution.order_manager import OrderManager, make_client_order_id
 from scalpengine.risk.kill_switch import KillSwitch
 from scalpengine.risk.state import Position
 
-MED = TIERS[Tier.MEDIUM]
+from .conftest import MED_WIDE as MED
 
 
 # ---------- kill switch ---------- #

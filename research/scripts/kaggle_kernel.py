@@ -29,6 +29,12 @@ TRAIN_ARGS = [
 
 import psutil
 print(f"RAM: {psutil.virtual_memory().total / 1e9:.1f} GB")
+import torch
+print(f"cuda available: {torch.cuda.is_available()}")
+print("inputs:", [str(p) for p in Path("/kaggle/input").rglob("*")][:8])
+assert DATASET.exists(), (
+    "dataset not attached — run must be launched via `kaggle kernels push` "
+    "(UI re-runs can drop the dataset attachment)")
 
 WORK.mkdir(parents=True, exist_ok=True)
 # Kaggle auto-extracts uploaded zips — handle both layouts

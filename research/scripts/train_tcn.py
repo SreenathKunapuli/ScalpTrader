@@ -63,6 +63,30 @@ def _file_key(path: Path) -> str:
     return path.stem  # "SYM_yyyy-mm-dd" — stable across machines/paths
 
 
+def _resolve_device(device_arg: str):
+    """Resolve --device argument to a usable device object.
+
+    'auto' -> cuda > mps > cpu via pick_device() (dml is never auto-selected).
+    'dml'  -> torch_directml.device(); lazy import so the Windows-only package
+              is never imported on non-Windows machines.  Raises ImportError
+              with an actionable pip hint if torch_directml is not installed.
+    Other  -> torch.device(device_arg).
+    """
+    if device_arg == "auto":
+        return pick_device()
+    if device_arg == "dml":
+        try:
+            import torch_directml  # noqa: PLC0415 — Windows-only, lazy import
+        except ImportError as exc:
+            raise ImportError(
+                "DirectML device requested (--device dml) but torch_directml "
+                "is not installed. Install it with: "
+                "pip install torch-directml"
+            ) from exc
+        return torch_directml.device()
+    return torch.device(device_arg)
+
+
 def _load_split(
     files: list[Path], cfg: TrainConfig, window_s: int, scaler: dict,
     neg_frac: float | None, quality_stems: set[str] | None = None,
@@ -153,6 +177,12 @@ def main() -> None:
                         "fresh noise); 0.0 (default) disables augmentation "
                         "entirely. The val loader is NEVER augmented, "
                         "regardless of this flag.")
+    p.add_argument("--lr-schedule", choices=["constant", "cosine"],
+                   default="constant",
+                   help="LR schedule for training. 'constant' (default) keeps "
+                        "AdamW's fixed lr. 'cosine' chains a 2-epoch linear "
+                        "warmup with CosineAnnealingLR for the remaining "
+                        "epochs via SequentialLR.")
     p.add_argument("--quality-oversample", type=int, default=1,
                    help="oversampling knob: training samples whose source "
                         f"day is among the first {QUALITY_TOP_N} "
@@ -163,11 +193,13 @@ def main() -> None:
                         "meaningful when training beyond the top-"
                         f"{QUALITY_TOP_N} files (e.g. --train-quality-limit "
                         "unset or > that).")
-    p.add_argument("--device", choices=["auto", "mps", "cuda", "cpu"],
+    p.add_argument("--device", choices=["auto", "mps", "cuda", "cpu", "dml"],
                    default="auto",
                    help="compute device for training. 'auto' (default) "
                         "selects cuda if available, else mps, else cpu. "
-                        "ROCm/AMD torch builds report as cuda.")
+                        "ROCm/AMD torch builds report as cuda. "
+                        "'dml' selects Windows DirectML (requires "
+                        "torch-directml; never auto-selected).")
     p.add_argument("--out", default="runs/tcn")
     args = p.parse_args()
 
@@ -178,10 +210,7 @@ def main() -> None:
         args.neg_frac if args.val_neg_frac is None else args.val_neg_frac
     )
 
-    if args.device == "auto":
-        device = pick_device()
-    else:
-        device = torch.device(args.device)
+    device = _resolve_device(args.device)
 
     cfg = TrainConfig(target_ps=args.target_ps, stop_ps=args.stop_ps,
                       timeout_s=args.timeout, barrier_mode=args.barrier_mode,
@@ -298,9 +327,11 @@ def main() -> None:
     model = ScalpTCN(n_features=n_features, window_s=args.window,
                      channels=args.channels, blocks=args.blocks,
                      dropout=args.dropout)
-    print(f"training on {device} (pos_weight={pos_weight:.3f}) ...", flush=True)
+    print(f"training on {device} (pos_weight={pos_weight:.3f}, "
+          f"lr_schedule={args.lr_schedule}) ...", flush=True)
     history, best_state = train(model, (train_loader, val_loader), args.epochs,
-                                args.lr, pos_weight, device, args.patience)
+                                args.lr, pos_weight, device, args.patience,
+                                schedule=args.lr_schedule)
 
     state_to_save = best_state if best_state is not None else model.state_dict()
     torch.save(state_to_save, out / "model.pt")
@@ -326,6 +357,9 @@ def main() -> None:
         "val_start_date": args.val_start_date,
         "train_quality_limit": args.train_quality_limit,
         "device": str(device),
+        "device_arg": args.device,
+        "device_resolved_date": time.strftime("%Y-%m-%d"),
+        "lr_schedule": args.lr_schedule,
         "git_head": _git_head(),
     }, indent=2))
 

@@ -7,6 +7,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import pytest
+from pathlib import Path
 
 from scalp.bars_features import build_features
 from scalp.deep.dataset import (apply_scaler, build_windows, fit_scaler,
@@ -377,9 +378,14 @@ def test_tcn_prob_model_predict_proba_rejects_multi_day_concatenation():
 def test_jitter_dataset_augments_train_batches_and_changes_between_epochs():
     """JitterDataset is the wrapper train_tcn.py puts ONLY around the train
     split (never val, see train_loop.train and its own test below). This
-    checks the class itself: noise is actually added, redrawing is
-    reproducible from (seed, epoch), fresh noise is drawn every epoch, and
-    sigma<=0 disables augmentation entirely (exact passthrough)."""
+    checks the class itself:
+
+    - noise is actually added per-sample in __getitem__ (no large tensor)
+    - same (seed, epoch, index) -> identical noise (determinism contract)
+    - different epoch -> different noise for same sample
+    - sigma<=0 disables augmentation entirely (exact passthrough)
+    - no attribute holds a tensor with the dataset's full shape (OOM guard)
+    """
     torch = pytest.importorskip("torch")
     from scalp.deep.dataset import JitterDataset
 
@@ -393,23 +399,49 @@ def test_jitter_dataset_augments_train_batches_and_changes_between_epochs():
     batch0 = torch.stack([ds[i][0] for i in range(n)])
     assert not torch.allclose(batch0, X)          # noise was actually added
 
-    # reproducible: same (seed, epoch) -> identical noise
+    # determinism: same (seed, epoch, index) -> identical noise
     ds2 = JitterDataset(X, y, sigma=0.5, seed=42)
     ds2.set_epoch(0)
     batch0_again = torch.stack([ds2[i][0] for i in range(n)])
     torch.testing.assert_close(batch0, batch0_again)
 
-    # fresh noise every epoch
+    # per-sample determinism: each individual index is reproducible
+    for i in (0, 1, n // 2, n - 1):
+        x_i_a = ds[i][0]
+        x_i_b = ds2[i][0]
+        torch.testing.assert_close(x_i_a, x_i_b,
+                                   msg=f"sample {i} noise not deterministic")
+
+    # different epoch -> different noise for the same sample
     ds.set_epoch(1)
     batch1 = torch.stack([ds[i][0] for i in range(n)])
     assert not torch.allclose(batch0, batch1)
+    # verify at least one individual sample differs (not just aggregate)
+    assert not torch.allclose(ds[0][0], ds2[0][0])  # epoch 1 vs epoch 0
 
     # sigma<=0 disables augmentation entirely -> exact passthrough
     ds_off = JitterDataset(X, y, sigma=0.0, seed=42)
     batch_off = torch.stack([ds_off[i][0] for i in range(n)])
     torch.testing.assert_close(batch_off, X)
 
+    # OOM guard: no attribute OTHER than 'X' (the data tensor itself) should
+    # hold a tensor with the full dataset shape (n, n_feat, window_s).
+    # The old implementation stored self._noise with exactly this shape —
+    # the new per-sample implementation must not materialise such a tensor.
+    ds_check = JitterDataset(X, y, sigma=0.5, seed=42)
+    ds_check.set_epoch(0)
+    full_shape = tuple(X.shape)  # (n, n_feat, window_s)
+    for attr_name, attr_val in vars(ds_check).items():
+        if attr_name in ("X",):
+            continue  # the data store itself is exempt
+        if isinstance(attr_val, torch.Tensor):
+            assert tuple(attr_val.shape) != full_shape, (
+                f"attribute '{attr_name}' holds a tensor with the full dataset "
+                f"shape {full_shape} — this would OOM on large datasets"
+            )
+
     # labels are never touched by jitter
+    ds.set_epoch(0)
     for i in range(n):
         torch.testing.assert_close(ds[i][1], y[i])
 
@@ -598,6 +630,40 @@ def test_tcn_prob_model_load_map_location_smoke(tmp_path):
     assert str(loaded_cpu.device) == "cpu"
     proba_cpu = loaded_cpu.predict_proba(feats)
     assert proba_cpu.shape == (len(idx), 2)
+
+
+# --------------------------------------------------------------------------- #
+# --device dml: clean ImportError when torch_directml is not installed
+# --------------------------------------------------------------------------- #
+def test_resolve_device_dml_raises_clean_error_when_torch_directml_missing(
+    monkeypatch,
+):
+    """On a machine without torch_directml (e.g. a Mac or Linux CI runner),
+    passing --device dml must raise an ImportError whose message tells the
+    user exactly how to fix it ('pip install torch-directml'), rather than
+    crashing with an opaque AttributeError or ModuleNotFoundError later."""
+    import builtins
+
+    real_import = builtins.__import__
+
+    def _block_directml(name, *args, **kwargs):
+        if name == "torch_directml":
+            raise ImportError("No module named 'torch_directml'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _block_directml)
+
+    # import after patching so the lazy import inside _resolve_device is live
+    import importlib
+    import sys
+
+    # force a fresh import of the script module (it may already be cached)
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    import scripts.train_tcn as _train_tcn  # noqa: PLC0415
+    importlib.reload(_train_tcn)
+
+    with pytest.raises(ImportError, match="pip install torch-directml"):
+        _train_tcn._resolve_device("dml")
 
 
 if __name__ == "__main__":

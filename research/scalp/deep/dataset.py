@@ -246,7 +246,7 @@ def subsample_negatives(
 # --------------------------------------------------------------------------- #
 class JitterDataset(torch.utils.data.Dataset):
     """TRAIN-SET-ONLY augmentation wrapper: adds fresh N(0, sigma) Gaussian
-    noise to the already-SCALED window tensor `X`, redrawn once per epoch.
+    noise to the already-SCALED window tensor `X`, redrawn per sample.
 
     Val loaders must NEVER be wrapped in this — scalp.deep.train_loop.train
     calls set_epoch(epoch) on train_loader.dataset only (never
@@ -255,10 +255,13 @@ class JitterDataset(torch.utils.data.Dataset):
     unmodified and no RNG is ever drawn, so wrapping unconditionally at the
     default --jitter-sigma 0.0 is a no-op byte-for-byte.
 
-    Reproducibility: set_epoch(epoch) reseeds a fresh torch.Generator from
-    `seed + epoch` and materializes the noise tensor for that epoch in one
-    shot (same shape as X) — the same (seed, epoch) pair always redraws
-    identical noise, and every epoch draws a fresh one.
+    Reproducibility: noise is generated per-sample in __getitem__ using a
+    torch.Generator seeded deterministically from (seed, current_epoch,
+    index). This avoids materialising a noise tensor the size of the whole
+    dataset (which OOM-killed machines at sigma > 0). The same (seed, epoch,
+    index) triple always produces identical noise; a different epoch always
+    produces different noise. set_epoch(epoch) stores the current epoch number
+    and is the required epoch hook for train_loop.train.
     """
 
     def __init__(self, X: torch.Tensor, y: torch.Tensor, sigma: float,
@@ -267,21 +270,28 @@ class JitterDataset(torch.utils.data.Dataset):
         self.y = y
         self.sigma = float(sigma)
         self.seed = int(seed)
-        self._noise: torch.Tensor | None = None
+        self._epoch: int = 0
         self.set_epoch(0)
 
     def set_epoch(self, epoch: int) -> None:
-        if self.sigma <= 0.0:
-            self._noise = None
-            return
-        gen = torch.Generator().manual_seed(self.seed + int(epoch))
-        self._noise = torch.randn(self.X.shape, generator=gen) * self.sigma
+        self._epoch = int(epoch)
 
     def __len__(self) -> int:
         return len(self.X)
 
     def __getitem__(self, i: int) -> tuple[torch.Tensor, torch.Tensor]:
         x = self.X[i]
-        if self._noise is not None:
-            x = x + self._noise[i]
+        if self.sigma > 0.0:
+            # Seed combines base_seed, epoch, and sample index so that:
+            #   - same (epoch, i) always produces identical noise
+            #   - different epochs produce different noise for each sample
+            # All arithmetic stays in 64-bit to avoid wrap-around collisions.
+            seed_val = (
+                self.seed * 1_000_003
+                + self._epoch * 1_000_000_007
+                + int(i)
+            ) % (2**63)
+            gen = torch.Generator().manual_seed(seed_val)
+            noise = torch.empty_like(x).normal_(generator=gen) * self.sigma
+            x = x + noise
         return x, self.y[i]

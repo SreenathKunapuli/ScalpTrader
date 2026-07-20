@@ -24,10 +24,11 @@ class Tier(StrEnum):
     HIGH = "high"
 
 
-_LOW_UNIVERSE = ["SPY", "QQQ", "IWM", "DIA", "XLK", "XLF", "XLE", "XLV", "GLD", "TLT"]
-_MED_UNIVERSE = _LOW_UNIVERSE + [
-    "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "AVGO", "JPM", "UNH",
-]
+# Scalp engine: the seed universe is just market context — nearly all stream
+# slots belong to the morning/intraday runner scans (LOB's 20-name megacap
+# default ate 20 of 30 slots and left the scalper 2 runner eyes)
+_LOW_UNIVERSE = ["SPY", "QQQ"]
+_MED_UNIVERSE = _LOW_UNIVERSE
 
 
 @dataclass(frozen=True)

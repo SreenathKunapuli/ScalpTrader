@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import subprocess
 import sys
 import time
@@ -34,8 +35,8 @@ import torch
 from torch.utils.data import DataLoader, TensorDataset, WeightedRandomSampler
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from scalp.deep.dataset import JitterDataset, apply_scaler, build_windows, \
-    fit_scaler, save_scaler, subsample_negatives  # noqa: E402
+from scalp.deep.dataset import JitterDataset, MemmapWindows, apply_scaler, \
+    build_windows, fit_scaler, save_scaler, subsample_negatives  # noqa: E402
 from scalp.deep.model import ScalpTCN, pick_device  # noqa: E402
 from scalp.deep.train_loop import train  # noqa: E402
 from scalp.walkforward import TrainConfig, split_days  # noqa: E402
@@ -125,6 +126,55 @@ def _load_split(
     return np.concatenate(xs, axis=0), np.concatenate(ys, axis=0), q_all
 
 
+def _build_split_disk(
+    files: list[Path], cfg: TrainConfig, window_s: int, scaler: dict,
+    neg_frac: float | None, store_path: Path,
+    quality_stems: set[str] | None = None,
+) -> tuple["MemmapWindows._FinalizedMemmapWindows", np.ndarray | None]:
+    """Disk-backed variant of _load_split.
+
+    Appends each day's (post-scale) windows to a MemmapWindows store under
+    `store_path` one file at a time — never accumulates the full dataset in
+    RAM.  Returns the finalized store (a Dataset-compatible object) and,
+    optionally, a bool quality array aligned 1:1 with the stored samples
+    (for WeightedRandomSampler).
+
+    Scaling order (IMPORTANT): scaler must already be fit before calling
+    this function; raw windows are built, scaler is applied, THEN the
+    scaled chunk is appended to disk.  The scaler is never fit here.
+    """
+    from scalp.deep.dataset import MemmapWindows  # noqa: PLC0415 (local re-import ok)
+    n_features = len(scaler["feature_names"])
+    store = MemmapWindows.create(store_path, n_features=n_features,
+                                 window_s=window_s)
+    quals: list[np.ndarray] = []
+    any_samples = False
+    for path in files:
+        bars = pd.read_parquet(path)
+        X, y, idx = build_windows(bars, cfg, window_s)
+        del bars
+        if len(y) == 0:
+            continue
+        if neg_frac is not None:
+            X, y, idx = subsample_negatives(X, y, idx, cfg, _file_key(path),
+                                            neg_frac)
+            if len(y) == 0:
+                continue
+        X_scaled = apply_scaler(X, scaler)
+        del X
+        store.append(X_scaled, y)
+        del X_scaled
+        if quality_stems is not None:
+            quals.append(np.full(len(y), path.stem in quality_stems,
+                                 dtype=bool))
+        any_samples = True
+    if not any_samples:
+        raise ValueError("no samples in this file set")
+    ds = store.finalize()
+    q_all = np.concatenate(quals, axis=0) if quality_stems is not None else None
+    return ds, q_all
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     # data flags, mirroring train_scalper.py
@@ -200,6 +250,14 @@ def main() -> None:
                         "ROCm/AMD torch builds report as cuda. "
                         "'dml' selects Windows DirectML (requires "
                         "torch-directml; never auto-selected).")
+    p.add_argument("--window-store", choices=["ram", "disk"], default="ram",
+                   help="where to hold the windowed dataset during training. "
+                        "'ram' (default) accumulates all windows in memory "
+                        "(original behavior). 'disk' writes each day's "
+                        "post-scale windows to memmap files under "
+                        "<out>/wcache/ so RAM usage is O(window) not "
+                        "O(dataset); wcache is deleted after a successful "
+                        "training run.")
     p.add_argument("--out", default="runs/tcn")
     args = p.parse_args()
 
@@ -277,33 +335,102 @@ def main() -> None:
     if args.quality_oversample != 1:
         quality_stems = {f.stem for f in files[:QUALITY_TOP_N]}
 
-    print("building train windows ...", flush=True)
-    x_tr, y_tr, q_tr = _load_split(core_train_files, cfg, args.window, scaler,
-                                   args.neg_frac, quality_stems)
-    print(f"  {len(y_tr):,} samples; positive rate "
-          f"{float(y_tr.mean()):.4f}", flush=True)
-    if q_tr is not None:
-        print(f"  quality-oversample: {int(q_tr.sum()):,}/{len(y_tr):,} "
-              f"train samples from top {QUALITY_TOP_N} manifest rows -> "
-              f"x{args.quality_oversample} sampling weight", flush=True)
+    wcache_dir = out / "wcache"
+    use_disk = (args.window_store == "disk")
 
-    if val_files:
-        print(f"building val windows (val_neg_frac={val_neg_frac}) ...",
-              flush=True)
-        x_val, y_val, _ = _load_split(val_files, cfg, args.window, scaler,
-                                      neg_frac=val_neg_frac)
-        print(f"  {len(y_val):,} samples; positive rate "
-              f"{float(y_val.mean()):.4f}", flush=True)
+    if use_disk:
+        print("building train windows (disk store) ...", flush=True)
+        tr_store, q_tr = _build_split_disk(
+            core_train_files, cfg, args.window, scaler,
+            args.neg_frac, wcache_dir / "train", quality_stems,
+        )
+        n_tr_samples = len(tr_store)
+        # Collect y values for pos_weight computation without loading X.
+        # Re-open y mmap directly (O(n) ints, tiny).
+        _y_mm = np.memmap(wcache_dir / "train" / MemmapWindows._Y_FILE,
+                          dtype=np.int8, mode="r", shape=(n_tr_samples,))
+        y_tr_arr = np.array(_y_mm)
+        del _y_mm
+        n_pos = int(y_tr_arr.sum())
+        n_tr = n_tr_samples
+        print(f"  {n_tr:,} samples; positive rate "
+              f"{float(y_tr_arr.mean()):.4f}", flush=True)
+        if q_tr is not None:
+            print(f"  quality-oversample: {int(q_tr.sum()):,}/{n_tr:,} "
+                  f"train samples from top {QUALITY_TOP_N} manifest rows -> "
+                  f"x{args.quality_oversample} sampling weight", flush=True)
+        # JitterDataset wraps the disk store (no full-tensor copy).
+        torch.manual_seed(args.seed)
+        train_dataset = JitterDataset(
+            sigma=args.jitter_sigma, seed=args.seed, inner=tr_store,
+        )
+        if val_files:
+            print(f"building val windows (disk store, val_neg_frac={val_neg_frac}) ...",
+                  flush=True)
+            val_store, _ = _build_split_disk(
+                val_files, cfg, args.window, scaler,
+                val_neg_frac, wcache_dir / "val",
+            )
+            n_val = len(val_store)
+            _yv_mm = np.memmap(wcache_dir / "val" / MemmapWindows._Y_FILE,
+                               dtype=np.int8, mode="r", shape=(n_val,))
+            y_val_arr = np.array(_yv_mm)
+            del _yv_mm
+            print(f"  {n_val:,} val samples; positive rate "
+                  f"{float(y_val_arr.mean()):.4f}", flush=True)
+            val_loader = DataLoader(
+                val_store, batch_size=args.batch * 2, shuffle=False,
+            )
+        else:
+            n_val = 0
+            y_val_arr = np.empty((0,), dtype=np.int8)
+            val_loader = DataLoader(
+                TensorDataset(
+                    torch.empty((0, n_features, args.window), dtype=torch.float32),
+                    torch.empty((0,), dtype=torch.float32),
+                ),
+                batch_size=args.batch * 2, shuffle=False,
+            )
+        # pos_weight uses train labels only (already loaded above).
+        n_neg = int(n_tr - n_pos)
+        pos_weight = (n_neg / n_pos) if n_pos > 0 else 1.0
+        y_tr = y_tr_arr   # alias for config.json reporting
+        y_val = y_val_arr
     else:
-        x_val = np.empty((0, n_features, args.window), dtype=np.float32)
-        y_val = np.empty((0,), dtype=np.int8)
-    torch.manual_seed(args.seed)
-    # train-only augmentation: sigma<=0 (default) is a byte-for-byte no-op,
-    # so this wraps unconditionally (see JitterDataset docstring).
-    train_dataset = JitterDataset(
-        torch.from_numpy(x_tr), torch.from_numpy(y_tr.astype(np.float32)),
-        sigma=args.jitter_sigma, seed=args.seed,
-    )
+        # RAM mode (original behavior).
+        print("building train windows ...", flush=True)
+        x_tr, y_tr, q_tr = _load_split(core_train_files, cfg, args.window,
+                                        scaler, args.neg_frac, quality_stems)
+        print(f"  {len(y_tr):,} samples; positive rate "
+              f"{float(y_tr.mean()):.4f}", flush=True)
+        if q_tr is not None:
+            print(f"  quality-oversample: {int(q_tr.sum()):,}/{len(y_tr):,} "
+                  f"train samples from top {QUALITY_TOP_N} manifest rows -> "
+                  f"x{args.quality_oversample} sampling weight", flush=True)
+        if val_files:
+            print(f"building val windows (val_neg_frac={val_neg_frac}) ...",
+                  flush=True)
+            x_val, y_val, _ = _load_split(val_files, cfg, args.window, scaler,
+                                          neg_frac=val_neg_frac)
+            print(f"  {len(y_val):,} samples; positive rate "
+                  f"{float(y_val.mean()):.4f}", flush=True)
+        else:
+            x_val = np.empty((0, n_features, args.window), dtype=np.float32)
+            y_val = np.empty((0,), dtype=np.int8)
+        torch.manual_seed(args.seed)
+        train_dataset = JitterDataset(
+            torch.from_numpy(x_tr), torch.from_numpy(y_tr.astype(np.float32)),
+            sigma=args.jitter_sigma, seed=args.seed,
+        )
+        val_loader = DataLoader(
+            TensorDataset(torch.from_numpy(x_val),
+                         torch.from_numpy(y_val.astype(np.float32))),
+            batch_size=args.batch * 2, shuffle=False,
+        )
+        n_pos = int(y_tr.sum())
+        n_neg = int(len(y_tr) - n_pos)
+        pos_weight = (n_neg / n_pos) if n_pos > 0 else 1.0
+
     sampler = None
     if q_tr is not None:
         weights = np.where(q_tr, float(args.quality_oversample), 1.0)
@@ -314,15 +441,6 @@ def main() -> None:
         train_dataset, batch_size=args.batch, sampler=sampler,
         shuffle=(sampler is None), drop_last=True,
     )
-    val_loader = DataLoader(
-        TensorDataset(torch.from_numpy(x_val),
-                     torch.from_numpy(y_val.astype(np.float32))),
-        batch_size=args.batch * 2, shuffle=False,
-    )
-
-    n_pos = int(y_tr.sum())
-    n_neg = int(len(y_tr) - n_pos)
-    pos_weight = (n_neg / n_pos) if n_pos > 0 else 1.0
 
     model = ScalpTCN(n_features=n_features, window_s=args.window,
                      channels=args.channels, blocks=args.blocks,
@@ -360,8 +478,14 @@ def main() -> None:
         "device_arg": args.device,
         "device_resolved_date": time.strftime("%Y-%m-%d"),
         "lr_schedule": args.lr_schedule,
+        "window_store": args.window_store,
         "git_head": _git_head(),
     }, indent=2))
+
+    # Delete disk cache after a successful training run (model.pt is saved).
+    if use_disk and wcache_dir.exists():
+        shutil.rmtree(wcache_dir)
+        print(f"  wcache deleted: {wcache_dir}")
 
     if history:
         best = max(history, key=lambda r: r["val_ap"])

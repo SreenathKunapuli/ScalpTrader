@@ -28,6 +28,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -46,6 +47,7 @@ __all__ = [
     "load_scaler",
     "subsample_negatives",
     "JitterDataset",
+    "MemmapWindows",
 ]
 
 
@@ -242,6 +244,219 @@ def subsample_negatives(
 
 
 # --------------------------------------------------------------------------- #
+# Disk-backed window store: avoids accumulating all windows in RAM
+# --------------------------------------------------------------------------- #
+class MemmapWindows:
+    """On-disk growable store for (X, y) window pairs.
+
+    Files layout under `path` dir:
+      X.f32.mmap  — float32 memmap, shape [n, n_features, window_s]
+      y.i8.mmap   — int8 memmap, shape [n]
+      meta.json   — {"n": int, "n_features": int, "window_s": int}
+
+    Usage
+    -----
+    store = MemmapWindows.create(path, n_features=F, window_s=W)
+    for X_chunk, y_chunk in day_chunks:
+        store.append(X_chunk, y_chunk)    # X_chunk: float32 [k, F, W]
+    ds = store.finalize()                 # returns a Dataset-like object
+
+    The finalized object exposes __len__ and __getitem__(i) -> (Tensor, int8).
+    Each __getitem__ copies the mmap row into a fresh numpy array before
+    wrapping in a tensor so torch/DataLoader workers never hold an open
+    file-descriptor reference across the full dataset.
+
+    Deterministic: row i always returns the same data regardless of worker
+    count or DataLoader shuffle — the mmap is read-only after finalize().
+    """
+
+    _X_FILE = "X.f32.mmap"
+    _Y_FILE = "y.i8.mmap"
+    _META_FILE = "meta.json"
+    # Initial allocation size; grown by doubling when needed.
+    _INIT_CAP = 4096
+
+    def __init__(self, path: Path, n_features: int, window_s: int,
+                 _cap: int = 0, _n: int = 0):
+        self._path = Path(path)
+        self._n_features = int(n_features)
+        self._window_s = int(window_s)
+        self._cap = int(_cap)
+        self._n = int(_n)
+        self._X: Optional[np.memmap] = None
+        self._y: Optional[np.memmap] = None
+
+    # ------------------------------------------------------------------
+    # Construction
+    # ------------------------------------------------------------------
+    @classmethod
+    def create(cls, path: Path, n_features: int, window_s: int) -> "MemmapWindows":
+        """Create a new empty store at `path` (directory must not already
+        contain store files; `path` is created if it does not exist)."""
+        path = Path(path)
+        path.mkdir(parents=True, exist_ok=True)
+        cap = cls._INIT_CAP
+        n_features = int(n_features)
+        window_s = int(window_s)
+        # Open the backing files at initial capacity; mode='w+' creates/truncates.
+        np.memmap(path / cls._X_FILE, dtype=np.float32, mode="w+",
+                  shape=(cap, n_features, window_s))
+        np.memmap(path / cls._Y_FILE, dtype=np.int8, mode="w+", shape=(cap,))
+        inst = cls(path, n_features, window_s, _cap=cap, _n=0)
+        inst._write_meta()
+        return inst
+
+    @classmethod
+    def open(cls, path: Path) -> "_FinalizedMemmapWindows":
+        """Re-open a finalized store for read-only indexing."""
+        path = Path(path)
+        meta = json.loads((path / cls._META_FILE).read_text())
+        n = meta["n"]
+        n_features = meta["n_features"]
+        window_s = meta["window_s"]
+        inst = cls(path, n_features, window_s, _cap=n, _n=n)
+        return _FinalizedMemmapWindows(inst)
+
+    # ------------------------------------------------------------------
+    # Append
+    # ------------------------------------------------------------------
+    def _open_mmaps(self, mode: str = "r+") -> tuple[np.memmap, np.memmap]:
+        X = np.memmap(self._path / self._X_FILE, dtype=np.float32, mode=mode,
+                      shape=(self._cap, self._n_features, self._window_s))
+        y = np.memmap(self._path / self._Y_FILE, dtype=np.int8, mode=mode,
+                      shape=(self._cap,))
+        return X, y
+
+    def _grow(self, needed: int) -> None:
+        """Double capacity until `needed` additional rows fit."""
+        new_cap = self._cap
+        while new_cap < self._n + needed:
+            new_cap = max(new_cap * 2, needed)
+        # Resize by reading existing data, writing a larger file.
+        old_X, old_y = self._open_mmaps(mode="r")
+        snap_X = np.array(old_X[: self._n])
+        snap_y = np.array(old_y[: self._n])
+        del old_X, old_y  # close old mmaps before resizing files
+
+        new_X = np.memmap(self._path / self._X_FILE, dtype=np.float32,
+                          mode="w+",
+                          shape=(new_cap, self._n_features, self._window_s))
+        new_y = np.memmap(self._path / self._Y_FILE, dtype=np.int8,
+                          mode="w+", shape=(new_cap,))
+        new_X[: self._n] = snap_X
+        new_y[: self._n] = snap_y
+        new_X.flush()
+        new_y.flush()
+        del new_X, new_y
+        self._cap = new_cap
+
+    def append(self, X_chunk: np.ndarray, y_chunk: np.ndarray) -> None:
+        """Append a chunk of windows to the store.
+
+        X_chunk: float32 [k, n_features, window_s] (post-scale).
+        y_chunk: int8    [k].
+        """
+        X_chunk = np.asarray(X_chunk, dtype=np.float32)
+        y_chunk = np.asarray(y_chunk, dtype=np.int8)
+        k = len(y_chunk)
+        if k == 0:
+            return
+        if self._n + k > self._cap:
+            self._grow(k)
+        X_mm, y_mm = self._open_mmaps(mode="r+")
+        X_mm[self._n: self._n + k] = X_chunk
+        y_mm[self._n: self._n + k] = y_chunk
+        X_mm.flush()
+        y_mm.flush()
+        del X_mm, y_mm
+        self._n += k
+        self._write_meta()
+
+    # ------------------------------------------------------------------
+    # Finalize
+    # ------------------------------------------------------------------
+    def finalize(self) -> "_FinalizedMemmapWindows":
+        """Truncate backing files to the actual count and return a
+        read-only Dataset-compatible object."""
+        if self._n == 0:
+            # Write empty files at the correct (0,) shapes.
+            np.memmap(self._path / self._X_FILE, dtype=np.float32, mode="w+",
+                      shape=(0, self._n_features, self._window_s))
+            np.memmap(self._path / self._Y_FILE, dtype=np.int8, mode="w+",
+                      shape=(0,))
+            self._cap = 0
+            self._write_meta()
+            return _FinalizedMemmapWindows(self)
+        # Truncate to actual size by re-writing only valid rows.
+        old_X, old_y = self._open_mmaps(mode="r")
+        snap_X = np.array(old_X[: self._n])
+        snap_y = np.array(old_y[: self._n])
+        del old_X, old_y
+
+        final_X = np.memmap(self._path / self._X_FILE, dtype=np.float32,
+                            mode="w+",
+                            shape=(self._n, self._n_features, self._window_s))
+        final_y = np.memmap(self._path / self._Y_FILE, dtype=np.int8,
+                            mode="w+", shape=(self._n,))
+        final_X[:] = snap_X
+        final_y[:] = snap_y
+        final_X.flush()
+        final_y.flush()
+        del final_X, final_y
+        self._cap = self._n
+        self._write_meta()
+        return _FinalizedMemmapWindows(self)
+
+    def _write_meta(self) -> None:
+        (self._path / self._META_FILE).write_text(json.dumps({
+            "n": self._n,
+            "n_features": self._n_features,
+            "window_s": self._window_s,
+        }, indent=2))
+
+
+class _FinalizedMemmapWindows(torch.utils.data.Dataset):
+    """Read-only Dataset view over a finalized MemmapWindows store.
+
+    __getitem__(i) copies the i-th row from the mmap into a fresh numpy
+    array so that the returned tensor is independent of the mmap file
+    handle (safe across DataLoader workers; the mmap is never passed
+    between processes).
+    """
+
+    def __init__(self, store: MemmapWindows):
+        self._path = store._path
+        self._n = store._n
+        self._n_features = store._n_features
+        self._window_s = store._window_s
+
+    def __len__(self) -> int:
+        return self._n
+
+    def __getitem__(self, i: int) -> tuple[torch.Tensor, torch.Tensor]:
+        X_mm = np.memmap(self._path / MemmapWindows._X_FILE, dtype=np.float32,
+                         mode="r",
+                         shape=(self._n, self._n_features, self._window_s))
+        y_mm = np.memmap(self._path / MemmapWindows._Y_FILE, dtype=np.int8,
+                         mode="r", shape=(self._n,))
+        # Copy into a plain numpy array — severs the mmap reference so
+        # torch never holds a mmap handle alive past this __getitem__ call.
+        x_row = np.array(X_mm[i])
+        y_val = int(y_mm[i])
+        del X_mm, y_mm
+        return torch.from_numpy(x_row), torch.tensor(y_val, dtype=torch.float32)
+
+    # expose n_features / window_s for callers that query shape
+    @property
+    def n_features(self) -> int:
+        return self._n_features
+
+    @property
+    def window_s(self) -> int:
+        return self._window_s
+
+
+# --------------------------------------------------------------------------- #
 # Train-time augmentation: additive Gaussian jitter, re-drawn every epoch
 # --------------------------------------------------------------------------- #
 class JitterDataset(torch.utils.data.Dataset):
@@ -262,12 +477,37 @@ class JitterDataset(torch.utils.data.Dataset):
     index) triple always produces identical noise; a different epoch always
     produces different noise. set_epoch(epoch) stores the current epoch number
     and is the required epoch hook for train_loop.train.
+
+    Accepts either:
+    - (X: torch.Tensor, y: torch.Tensor) — in-RAM mode (original interface).
+    - inner: _FinalizedMemmapWindows (or any Dataset returning (x_tensor,
+      y_tensor) from __getitem__) — disk-backed mode. In this case X and y
+      are NOT stored as full tensors; the inner dataset is indexed per sample
+      so RAM usage is O(1) not O(n). Pass inner=<dataset> and omit X/y.
     """
 
-    def __init__(self, X: torch.Tensor, y: torch.Tensor, sigma: float,
-                seed: int):
-        self.X = X
-        self.y = y
+    def __init__(
+        self,
+        X: "torch.Tensor | None" = None,
+        y: "torch.Tensor | None" = None,
+        sigma: float = 0.0,
+        seed: int = 0,
+        *,
+        inner: "torch.utils.data.Dataset | None" = None,
+    ):
+        if inner is not None:
+            # Disk-backed mode: do NOT store full tensors.
+            self._inner = inner
+            # X and y are intentionally not set as attributes to avoid the
+            # full-dataset-sized in-RAM tensor that the OOM guard checks for.
+            self._use_inner = True
+        else:
+            if X is None or y is None:
+                raise ValueError("JitterDataset: supply either inner= or (X, y)")
+            self.X = X
+            self.y = y
+            self._inner = None
+            self._use_inner = False
         self.sigma = float(sigma)
         self.seed = int(seed)
         self._epoch: int = 0
@@ -277,10 +517,16 @@ class JitterDataset(torch.utils.data.Dataset):
         self._epoch = int(epoch)
 
     def __len__(self) -> int:
+        if self._use_inner:
+            return len(self._inner)  # type: ignore[arg-type]
         return len(self.X)
 
     def __getitem__(self, i: int) -> tuple[torch.Tensor, torch.Tensor]:
-        x = self.X[i]
+        if self._use_inner:
+            x, y_i = self._inner[i]
+        else:
+            x = self.X[i]
+            y_i = self.y[i]
         if self.sigma > 0.0:
             # Seed combines base_seed, epoch, and sample index so that:
             #   - same (epoch, i) always produces identical noise
@@ -294,4 +540,4 @@ class JitterDataset(torch.utils.data.Dataset):
             gen = torch.Generator().manual_seed(seed_val)
             noise = torch.empty_like(x).normal_(generator=gen) * self.sigma
             x = x + noise
-        return x, self.y[i]
+        return x, y_i

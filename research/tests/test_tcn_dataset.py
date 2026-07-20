@@ -666,5 +666,185 @@ def test_resolve_device_dml_raises_clean_error_when_torch_directml_missing(
         _train_tcn._resolve_device("dml")
 
 
+# --------------------------------------------------------------------------- #
+# MemmapWindows: disk-backed window store
+# --------------------------------------------------------------------------- #
+
+def _ram_windows_for_days(
+    files, cfg, window_s, scaler,
+):
+    """Build (X, y) arrays in RAM the same way _load_split does, using the
+    same file order and neg-frac=None, for comparison against the disk store."""
+    xs, ys = [], []
+    for path in files:
+        bars = pd.read_parquet(path)
+        X, y, idx = build_windows(bars, cfg, window_s)
+        del bars, idx
+        if len(y) == 0:
+            continue
+        xs.append(apply_scaler(X, scaler))
+        del X
+        ys.append(y)
+    return np.concatenate(xs, axis=0), np.concatenate(ys, axis=0)
+
+
+def test_memmap_windows_round_trip_bit_for_bit(tmp_path):
+    """MemmapWindows store round-trip must be bit-for-bit identical to the
+    equivalent in-RAM arrays (same days, same sampling seed, neg_frac=None
+    so no subsampling ambiguity)."""
+    torch = pytest.importorskip("torch")
+    from scalp.deep.dataset import MemmapWindows
+
+    files = _write_days(tmp_path, n_files=3, n=N, seed0=42)
+    cfg = _cfg(seed=7)
+    scaler = fit_scaler(files, cfg, window_s=WINDOW)
+    n_features = len(scaler["feature_names"])
+
+    # Build in-RAM reference.
+    x_ram, y_ram = _ram_windows_for_days(files, cfg, WINDOW, scaler)
+
+    # Build disk store.
+    store_path = tmp_path / "store"
+    store = MemmapWindows.create(store_path, n_features=n_features,
+                                 window_s=WINDOW)
+    for path in files:
+        bars = pd.read_parquet(path)
+        X, y, idx = build_windows(bars, cfg, WINDOW)
+        del bars, idx
+        if len(y) == 0:
+            continue
+        store.append(apply_scaler(X, scaler), y)
+    ds = store.finalize()
+
+    assert len(ds) == len(y_ram), (
+        f"disk store has {len(ds)} rows, RAM has {len(y_ram)}"
+    )
+
+    # Compare every row bit-for-bit.
+    for i in range(len(ds)):
+        x_i, y_i = ds[i]
+        np.testing.assert_array_equal(
+            x_i.numpy(), x_ram[i],
+            err_msg=f"X mismatch at row {i}",
+        )
+        assert int(y_i.item()) == int(y_ram[i]), (
+            f"y mismatch at row {i}: got {int(y_i.item())}, expected {int(y_ram[i])}"
+        )
+
+
+def test_jitter_dataset_over_disk_store_augments_deterministically(tmp_path):
+    """JitterDataset wrapping a _FinalizedMemmapWindows (disk store) must
+    augment per-sample deterministically — same (seed, epoch, index) ->
+    identical noise, different epoch -> different noise — matching the
+    in-RAM JitterDataset behavior."""
+    torch = pytest.importorskip("torch")
+    from scalp.deep.dataset import JitterDataset, MemmapWindows
+
+    files = _write_days(tmp_path, n_files=2, n=N, seed0=77)
+    cfg = _cfg(seed=3)
+    scaler = fit_scaler(files, cfg, window_s=WINDOW)
+    n_features = len(scaler["feature_names"])
+
+    store_path = tmp_path / "store"
+    store = MemmapWindows.create(store_path, n_features=n_features,
+                                 window_s=WINDOW)
+    for path in files:
+        bars = pd.read_parquet(path)
+        X, y, idx = build_windows(bars, cfg, WINDOW)
+        del bars, idx
+        if len(y) == 0:
+            continue
+        store.append(apply_scaler(X, scaler), y)
+    ds = store.finalize()
+    n = len(ds)
+    assert n > 0, "no samples — test would be vacuous"
+
+    sigma = 0.3
+    seed = 99
+
+    # Epoch 0, run A.
+    jds_a = JitterDataset(sigma=sigma, seed=seed, inner=ds)
+    jds_a.set_epoch(0)
+    xs_a = [jds_a[i][0] for i in range(n)]
+
+    # Epoch 0, run B (independent instance) -> must match A.
+    jds_b = JitterDataset(sigma=sigma, seed=seed, inner=ds)
+    jds_b.set_epoch(0)
+    xs_b = [jds_b[i][0] for i in range(n)]
+
+    for i in range(n):
+        torch.testing.assert_close(xs_a[i], xs_b[i],
+                                   msg=f"noise not deterministic at epoch=0, i={i}")
+
+    # Epoch 1 -> must differ from epoch 0.
+    jds_a.set_epoch(1)
+    xs_epoch1 = [jds_a[i][0] for i in range(n)]
+    different = any(
+        not torch.allclose(xs_a[i], xs_epoch1[i]) for i in range(n)
+    )
+    assert different, "epoch change did not produce different noise"
+
+    # sigma=0 -> exact passthrough from disk store.
+    jds_off = JitterDataset(sigma=0.0, seed=seed, inner=ds)
+    for i in range(n):
+        x_raw, _ = ds[i]
+        x_off, _ = jds_off[i]
+        torch.testing.assert_close(x_off, x_raw,
+                                   msg=f"sigma=0 not exact passthrough at i={i}")
+
+
+def test_memmap_windows_no_full_dataset_ram_array(tmp_path):
+    """No attribute of a _FinalizedMemmapWindows (or of a JitterDataset
+    wrapping it) should hold a numpy array or torch tensor whose first
+    dimension equals the full dataset size — that would be the OOM pattern
+    this design is meant to avoid."""
+    torch = pytest.importorskip("torch")
+    from scalp.deep.dataset import JitterDataset, MemmapWindows
+
+    files = _write_days(tmp_path, n_files=2, n=N, seed0=55)
+    cfg = _cfg(seed=5)
+    scaler = fit_scaler(files, cfg, window_s=WINDOW)
+    n_features = len(scaler["feature_names"])
+
+    store_path = tmp_path / "store"
+    store = MemmapWindows.create(store_path, n_features=n_features,
+                                 window_s=WINDOW)
+    for path in files:
+        bars = pd.read_parquet(path)
+        X, y, idx = build_windows(bars, cfg, WINDOW)
+        del bars, idx
+        if len(y) == 0:
+            continue
+        store.append(apply_scaler(X, scaler), y)
+    ds = store.finalize()
+    n = len(ds)
+    assert n > 0
+
+    # Check _FinalizedMemmapWindows itself.
+    for attr_name, attr_val in vars(ds).items():
+        if isinstance(attr_val, (np.ndarray, torch.Tensor)):
+            assert attr_val.shape[0] != n, (
+                f"_FinalizedMemmapWindows.{attr_name} holds a full-dataset "
+                f"array of size {n} — violates the no-RAM-ceiling guarantee"
+            )
+
+    # Check JitterDataset wrapping the disk store.
+    jds = JitterDataset(sigma=0.2, seed=7, inner=ds)
+    jds.set_epoch(0)
+    for attr_name, attr_val in vars(jds).items():
+        if attr_name == "X":
+            # X is only present in RAM-mode JitterDataset; disk-mode must not
+            # set it at all, so if we reach here the disk-mode guarantee fails.
+            raise AssertionError(
+                "JitterDataset in disk mode must not set self.X "
+                "(would hold the full dataset in RAM)"
+            )
+        if isinstance(attr_val, (np.ndarray, torch.Tensor)):
+            assert attr_val.shape[0] != n, (
+                f"JitterDataset.{attr_name} holds a full-dataset array of "
+                f"size {n} in disk-store mode"
+            )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-q"])

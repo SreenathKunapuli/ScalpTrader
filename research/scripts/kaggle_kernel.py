@@ -23,9 +23,12 @@ TRAIN_ARGS = [
     "--device", "auto",            # resolves to cuda on Kaggle
     "--window", "240", "--channels", "64", "--blocks", "4",
     "--epochs", "40", "--patience", "6", "--lr", "1e-3",
-    "--batch", "512", "--neg-frac", "0.12",
+    "--batch", "512", "--neg-frac", "0.06", "--val-neg-frac", "0.06",
     "--jitter-sigma", "0.0",
 ]
+
+import psutil
+print(f"RAM: {psutil.virtual_memory().total / 1e9:.1f} GB")
 
 WORK.mkdir(parents=True, exist_ok=True)
 # Kaggle auto-extracts uploaded zips — handle both layouts

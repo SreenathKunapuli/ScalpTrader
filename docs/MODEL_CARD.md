@@ -456,3 +456,15 @@ free data cannot measure the model; the 0.6-vs-0.7 threshold experiment
 is starved. Decision pending (user): Alpaca Algo Trader Plus ($99/mo
 real-time SIP) vs retrain-on-IEX-bars vs accept the handicap.
 Repro: /tmp/iex_parity.py → /tmp/iex_parity_results.json.
+
+## Threshold ladder closed — 2026-07-21
+
+User asked to try 0.55 ("no trades happening" on free IEX). Same sim gate
+as the 0.6/0.7 runs (26f, 361 OOS days, realistic fills):
+thr 0.7 taker +$40,996 / maker +$39,652; 0.6 −$46,771 / +$37,589;
+0.55 −$131,443 / **+$842**; 0.50 −$274,930 / −$72,186
+(runs/sim_eval/20260721_132349, _133707). Each threshold step down ~2×
+the attempts and strictly worse economics; maker edge is gone by 0.55.
+Verdict: 0.6 stays deployed (measurement config); 0.7 is the robust
+fallback; anything lower is refuted. The no-trades problem is the FEED
+(see feed-parity entry above), not the threshold.

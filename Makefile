@@ -7,9 +7,12 @@ LOG := $(LOG_DIR)/engine_$(shell date +%Y%m%d).log
 
 .PHONY: run-engine status halt reset watch api web test
 
+# override tier per-run: make run-engine TIER=high (default comes from .env)
+TIER ?=
+
 run-engine:
 	@mkdir -p $(LOG_DIR)
-	@caffeinate -is $(PY)/scalpctl run 2>&1 | tee -a $(LOG)
+	@caffeinate -is $(PY)/scalpctl run $(if $(TIER),--tier $(TIER)) 2>&1 | tee -a $(LOG)
 
 status:
 	@$(PY)/scalpctl status

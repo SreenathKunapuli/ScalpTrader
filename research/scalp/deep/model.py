@@ -178,7 +178,7 @@ class TcnProbModel:
 
     @classmethod
     def load(cls, run_dir: Path, device: torch.device | None = None,
-            batch_size: int = 512) -> "TcnProbModel":
+            batch_size: int = 512) -> TcnProbModel:
         """Reconstruct from a train_tcn.py run dir: model.pt + scaler.json
         + config.json (architecture hyperparameters)."""
         run_dir = Path(run_dir)

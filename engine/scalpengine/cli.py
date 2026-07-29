@@ -17,6 +17,12 @@ import structlog
 from .config.settings import get_settings
 
 if TYPE_CHECKING:
+    from .config.scalp_tiers import ScalpConfig
+    from .config.settings import Settings
+    from .config.tiers import TierConfig
+    from .data.alpaca_stream import MarketStream
+    from .engine import Engine
+    from .execution.order_manager import OrderManager
     from .persistence.repo import Repo
 from .config.tiers import TIERS, Tier
 
@@ -35,8 +41,8 @@ def _repo() -> Repo:
     return Repo(s.resolved_database_url())
 
 
-async def _day_scanner(engine: "Engine", stream: "MarketStream",
-                       settings: "Settings", tier: "TierConfig") -> None:
+async def _day_scanner(engine: Engine, stream: MarketStream,
+                       settings: Settings, tier: TierConfig) -> None:
     """Continuously refresh the trading universe throughout the day.
 
     Phase 1 — morning scan (once per calendar day, fires at engine startup):
@@ -68,12 +74,12 @@ async def _day_scanner(engine: "Engine", stream: "MarketStream",
 
     morning_done: set = set()         # dates where morning scan completed
     ranker_done: set = set()          # dates where the 10:01 ranked scan ran
-    last_intraday_ts = dt.datetime.min.replace(tzinfo=dt.timezone.utc)
+    last_intraday_ts = dt.datetime.min.replace(tzinfo=dt.UTC)
     dynamic_added: list[str] = []     # FIFO queue of dynamically-added symbols
 
     while True:
         await asyncio.sleep(30)
-        now = dt.datetime.now(dt.timezone.utc)
+        now = dt.datetime.now(dt.UTC)
         today = now.date()
 
         # ── Phase 1.5: model-ranked morning scan (once per day, ~10:01 ET —
@@ -138,7 +144,7 @@ async def _day_scanner(engine: "Engine", stream: "MarketStream",
                         log.warning("day_scanner.morning_warmup_failed", error=str(exc))
                     engine.expand_universe(candidates)
                     dynamic_added.extend(candidates)
-                    engine.state.last_data_ts = dt.datetime.now(dt.timezone.utc)
+                    engine.state.last_data_ts = dt.datetime.now(dt.UTC)
                     stream.update_symbols(engine._live_universe,
                                          context=set(tier.universe))
                     log.info("day_scanner.morning_done", added=len(candidates),
@@ -205,14 +211,14 @@ async def _day_scanner(engine: "Engine", stream: "MarketStream",
 
         # Reset staleness clock before reconnect so the monitor doesn't fire
         # during the few seconds the stream is tearing down and rebuilding.
-        engine.state.last_data_ts = dt.datetime.now(dt.timezone.utc)
+        engine.state.last_data_ts = dt.datetime.now(dt.UTC)
         stream.update_symbols(engine._live_universe, context=set(tier.universe))
         log.info("day_scanner.intraday_done",
                  added=new_candidates, evicted=evict,
                  universe=len(engine._live_universe))
 
 
-def make_fill_handler(engine: "Engine", om: "OrderManager"):  # type: ignore[no-untyped-def]
+def make_fill_handler(engine: Engine, om: OrderManager):  # type: ignore[no-untyped-def]
     """Build the trade-updates fill callback (module-level so tests can wire
     it against a MockBroker-backed engine).
 
@@ -252,7 +258,7 @@ def make_fill_handler(engine: "Engine", om: "OrderManager"):  # type: ignore[no-
 
 
 def resolve_scalp_profile(profile: str,
-                          equity: float | None = None) -> "ScalpConfig | None":
+                          equity: float | None = None) -> ScalpConfig | None:
     """Map settings.scalp_profile to its frozen ScalpConfig.
 
     "off" -> None: the engine runs with every scalp/bracket path dormant
@@ -261,8 +267,7 @@ def resolve_scalp_profile(profile: str,
     follow; re-checked at each day roll). Anything else unrecognized is a
     config error on the money path — fail loudly rather than silently
     trading without brackets."""
-    from .config.scalp_tiers import SCALP_LARGE, SCALP_MID, SCALP_SMALL, \
-        profile_for_equity
+    from .config.scalp_tiers import SCALP_LARGE, SCALP_MID, SCALP_SMALL, profile_for_equity
 
     if profile == "off":
         return None
@@ -280,7 +285,7 @@ def resolve_scalp_profile(profile: str,
         f"unknown scalp_profile {profile!r} (expected off|auto|small|mid|large)")
 
 
-def rearm_open_scalps(engine: "Engine", scalp_cfg: "ScalpConfig") -> None:
+def rearm_open_scalps(engine: Engine, scalp_cfg: ScalpConfig) -> None:
     """Re-arm brackets for open intraday longs found at startup reconcile.
 
     Conservative restart behavior: the original arm-time target/stop/deadline

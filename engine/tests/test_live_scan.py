@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import json
 import sys
-from datetime import UTC, date, datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -39,16 +39,15 @@ if str(_RESEARCH) not in sys.path:
     sys.path.insert(0, str(_RESEARCH))
 
 from scalp.corpus import second_bars  # noqa: E402
-from scanner.rank import FEATURES, build_scanner_features, slice_early_bars  # noqa: E402
-
-from scalpengine.scanner.live_scan import (
+from scalpengine.persistence.repo import Repo  # noqa: E402
+from scalpengine.scanner.live_scan import (  # noqa: E402
     ScanResult,
     build_bars_from_ticks,
     build_daily_context,
     run_morning_scan,
     score_candidates,
 )
-from scalpengine.persistence.repo import Repo
+from scanner.rank import FEATURES, build_scanner_features, slice_early_bars  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Shared fixtures
@@ -445,13 +444,19 @@ class TestGracefulDegradation:
         """Client that always returns empty DataFrames."""
         class _NullClient:
             def get_stock_trades(self, req: Any) -> Any:
-                r = MagicMock(); r.df = pd.DataFrame(); return r
+                r = MagicMock()
+                r.df = pd.DataFrame()
+                return r
 
             def get_stock_quotes(self, req: Any) -> Any:
-                r = MagicMock(); r.df = pd.DataFrame(); return r
+                r = MagicMock()
+                r.df = pd.DataFrame()
+                return r
 
             def get_stock_bars(self, req: Any) -> Any:
-                r = MagicMock(); r.data = {}; return r
+                r = MagicMock()
+                r.data = {}
+                return r
 
         return _NullClient()
 
@@ -524,7 +529,9 @@ class TestGracefulDegradation:
                 return r
 
             def get_stock_bars(self, req: Any) -> Any:
-                r = MagicMock(); r.data = {}; return r
+                r = MagicMock()
+                r.data = {}
+                return r
 
         result = run_morning_scan(
             symbols=["GOOD", "BAD"],

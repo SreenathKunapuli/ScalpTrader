@@ -10,7 +10,6 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import pytest
-
 from scanner import backtest as bt
 from scanner import features as ft
 

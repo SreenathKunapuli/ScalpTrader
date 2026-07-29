@@ -137,8 +137,8 @@ async def test_bracket_target_coid_format_and_recorded(state, repo, mock_broker)
     assert order.side == "sell"
     # recorded in the repo with reason="target"
     with repo.session() as s:
-        from sqlalchemy import select
         from scalpengine.persistence.models import Order
+        from sqlalchemy import select
 
         row = s.scalar(select(Order).where(Order.client_order_id == expected_coid))
         assert row is not None

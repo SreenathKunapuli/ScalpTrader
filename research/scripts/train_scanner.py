@@ -36,7 +36,11 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scalp.walkforward import TrainConfig, split_days  # noqa: E402
 from scanner.rank import (  # noqa: E402
-    FEATURES, LABEL_HORIZON_S, build_scanner_features, decile_table, rank_ic,
+    FEATURES,
+    LABEL_HORIZON_S,
+    build_scanner_features,
+    decile_table,
+    rank_ic,
     slice_early_bars,
 )
 
@@ -142,7 +146,7 @@ def _daily_lookup(index: pd.DataFrame,
 
 def build_scanner_dataset(viability: pd.DataFrame, index: pd.DataFrame,
                           files: list[Path], horizon_s: int = LABEL_HORIZON_S,
-                          daily_raw: "pd.DataFrame | None" = None,
+                          daily_raw: pd.DataFrame | None = None,
                           ) -> pd.DataFrame:
     """One row per stock-day: morning features + realized-scalpability label.
 

@@ -23,8 +23,14 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from scalp.walkforward import TrainConfig, build_dataset, evaluate, fit_model, \
-    split_days, split_val_days  # noqa: E402
+from scalp.walkforward import (
+    TrainConfig,
+    build_dataset,
+    evaluate,
+    fit_model,
+    split_days,  # noqa: E402
+    split_val_days,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 MANIFEST = ROOT / "data" / "corpus" / "manifest.csv"

@@ -14,6 +14,7 @@ from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 from scalpengine.config.settings import get_settings
 from scalpengine.config.tiers import Tier
 from scalpengine.persistence.models import (
@@ -25,10 +26,16 @@ from scalpengine.persistence.models import (
     Trade,
 )
 from scalpengine.persistence.repo import Repo
-from pydantic import BaseModel
 from sqlalchemy import select
 
-from .auth import check_login_rate, decode_token, issue_guest_token, issue_token, require_auth, require_owner
+from .auth import (
+    check_login_rate,
+    decode_token,
+    issue_guest_token,
+    issue_token,
+    require_auth,
+    require_owner,
+)
 from .metrics import compute_metrics, downsample
 
 settings = get_settings()

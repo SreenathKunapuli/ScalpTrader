@@ -1,9 +1,8 @@
 import numpy as np
 import pytest
 import torch
-
 from scalp.losses import FocalLoss, class_weights
-from scalp.models import DeepLOB, TCN, build_model
+from scalp.models import TCN, DeepLOB, build_model
 
 
 def test_deeplob_forward():

@@ -1,6 +1,5 @@
 import numpy as np
 import pytest
-
 from scalp.features import Normalizer, build_raw40, make_features, split_book
 from scalp.labels import DOWN, FLAT, INVALID, UP, LabelConfig, make_labels, suggest_alpha
 from scalp.simulator import LOBSimulator, SimConfig

@@ -7,12 +7,14 @@ from datetime import UTC
 from hypothesis import given
 from hypothesis import strategies as st
 from scalpengine.config.scalp_tiers import SCALP_LARGE
-from scalpengine.config.tiers import TIERS, Tier
+from scalpengine.config.tiers import TIERS
 from scalpengine.risk.risk_manager import Approval, OrderIntent, Rejection, RiskManager
 from scalpengine.risk.sizing import size_position
 from scalpengine.risk.state import Position
 
-from .conftest import IN_SESSION, HIGH_WIDE as HIGH, MED_WIDE as MED
+from .conftest import HIGH_WIDE as HIGH
+from .conftest import IN_SESSION
+from .conftest import MED_WIDE as MED
 
 
 # ---------- sizing ---------- #

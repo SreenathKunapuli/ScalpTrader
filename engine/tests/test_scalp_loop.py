@@ -4,8 +4,7 @@ plumbing is tested independently of sklearn."""
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
-from types import SimpleNamespace
+from datetime import datetime, timedelta
 
 import pytest
 from scalpengine.signals.scalp_gbt import ScalpDecision

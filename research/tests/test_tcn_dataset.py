@@ -4,15 +4,20 @@ synthetic bars only, no corpus, no real training."""
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
-from pathlib import Path
-
 from scalp.bars_features import build_features
-from scalp.deep.dataset import (apply_scaler, build_windows, fit_scaler,
-                                save_scaler, subsample_negatives,
-                                windows_for_all_seconds)
+from scalp.deep.dataset import (
+    apply_scaler,
+    build_windows,
+    fit_scaler,
+    save_scaler,
+    subsample_negatives,
+    windows_for_all_seconds,
+)
 from scalp.triple_barrier import label_scalps
 from scalp.walkforward import TrainConfig, barrier_arrays
 
@@ -453,11 +458,10 @@ def test_train_loop_val_batches_bit_identical_with_train_jitter_on():
     TensorDataset) and its batches must come out bit-identical to the raw
     val tensor, epoch after epoch, even with jitter cranked up on train."""
     torch = pytest.importorskip("torch")
-    from torch.utils.data import DataLoader, TensorDataset
-
     from scalp.deep.dataset import JitterDataset
     from scalp.deep.model import ScalpTCN
     from scalp.deep.train_loop import train
+    from torch.utils.data import DataLoader, TensorDataset
 
     n_feat, window_s = 3, 6
     n_tr, n_val = 32, 10

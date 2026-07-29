@@ -20,8 +20,6 @@ from scalpengine.signals.ensemble import Ensemble
 from scalpengine.signals.mean_reversion import MeanReversionSignal
 from scalpengine.signals.momentum import MomentumSignal
 
-from .conftest import MockBroker
-
 MED = TIERS[Tier.MEDIUM]
 T0 = datetime(2026, 6, 15, 15, 0, tzinfo=UTC)  # Monday 11:00 ET, in session
 

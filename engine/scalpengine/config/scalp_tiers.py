@@ -29,7 +29,7 @@ class ScalpConfig:
     per_symbol_loss_cap_pct: float  # HARD: per-symbol realized loss today -> block that symbol
     target_ps: float             # PLACEHOLDER: take-profit as frac of price (model overrides)
     stop_ps: float               # PLACEHOLDER: stop distance as frac of price (model overrides)
-    timeout_s: int               # PLACEHOLDER: max holding time before timeout exit (model overrides)
+    timeout_s: int               # PLACEHOLDER: max hold before timeout exit (model overrides)
     max_participation: float     # HARD: max frac of available volume we take
     price_min: float             # HARD: reject scalps priced below this (avoids sub-dollar names)
     price_max: float             # HARD: reject scalps priced above this (share-granularity risk)

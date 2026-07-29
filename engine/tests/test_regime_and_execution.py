@@ -6,7 +6,6 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-import numpy as np
 from scalpengine.data.bar_builder import Bar
 from scalpengine.execution.broker import BrokerOrder
 from scalpengine.execution.order_manager import OrderManager
@@ -14,7 +13,9 @@ from scalpengine.risk.risk_manager import OrderIntent, RiskManager
 from scalpengine.signals.ensemble import Ensemble, trend_weight
 from scalpengine.signals.mean_reversion import MeanReversionSignal
 from scalpengine.signals.momentum import MomentumSignal
+
 from .conftest import MED_WIDE as MED
+
 IN_SESSION = datetime(2026, 6, 15, 15, 0, tzinfo=UTC)
 
 

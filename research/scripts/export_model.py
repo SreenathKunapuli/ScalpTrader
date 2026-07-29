@@ -23,8 +23,11 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scalp.viability import FeeModel  # noqa: E402
 from scalp.walkforward import TrainConfig, build_dataset, fit_model  # noqa: E402
-from scripts.train_scalper import drop_columns, limit_by_quality, \
-    parse_drop_features  # noqa: E402
+from scripts.train_scalper import (
+    drop_columns,
+    limit_by_quality,
+    parse_drop_features,  # noqa: E402
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 MANIFEST = ROOT / "data" / "corpus" / "manifest.csv"

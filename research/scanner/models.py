@@ -62,7 +62,7 @@ class MLPRanker:
     def __init__(self) -> None:
         self.nets: list[_MLP] = []
 
-    def fit(self, x: np.ndarray, y: np.ndarray) -> "MLPRanker":
+    def fit(self, x: np.ndarray, y: np.ndarray) -> MLPRanker:
         self.nets = [_train_one_mlp(x, y, s) for s in MLP_SEEDS]
         return self
 
@@ -79,7 +79,7 @@ class GBTRanker:
             max_iter=300, learning_rate=0.05, max_leaf_nodes=31,
             l2_regularization=1.0, early_stopping=False, random_state=seed)
 
-    def fit(self, x: np.ndarray, y: np.ndarray) -> "GBTRanker":
+    def fit(self, x: np.ndarray, y: np.ndarray) -> GBTRanker:
         self.m.fit(x, y)
         return self
 
@@ -94,7 +94,7 @@ class TeacherEnsemble:
         self.gbt = GBTRanker()
         self.mlp = MLPRanker()
 
-    def fit(self, x: np.ndarray, y: np.ndarray) -> "TeacherEnsemble":
+    def fit(self, x: np.ndarray, y: np.ndarray) -> TeacherEnsemble:
         self.gbt.fit(x, y)
         self.mlp.fit(x, y)
         return self
@@ -112,7 +112,7 @@ class DistilledStudent:
         self.teacher = teacher
         self.m = Ridge(alpha=alpha)
 
-    def fit(self, x: np.ndarray, y_unused: np.ndarray | None = None) -> "DistilledStudent":
+    def fit(self, x: np.ndarray, y_unused: np.ndarray | None = None) -> DistilledStudent:
         self.m.fit(x, self.teacher.predict(x))  # soft targets, not labels
         return self
 

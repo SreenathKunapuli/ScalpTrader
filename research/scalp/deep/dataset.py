@@ -28,7 +28,6 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -283,14 +282,14 @@ class MemmapWindows:
         self._window_s = int(window_s)
         self._cap = int(_cap)
         self._n = int(_n)
-        self._X: Optional[np.memmap] = None
-        self._y: Optional[np.memmap] = None
+        self._X: np.memmap | None = None
+        self._y: np.memmap | None = None
 
     # ------------------------------------------------------------------
     # Construction
     # ------------------------------------------------------------------
     @classmethod
-    def create(cls, path: Path, n_features: int, window_s: int) -> "MemmapWindows":
+    def create(cls, path: Path, n_features: int, window_s: int) -> MemmapWindows:
         """Create a new empty store at `path` (directory must not already
         contain store files; `path` is created if it does not exist)."""
         path = Path(path)
@@ -307,7 +306,7 @@ class MemmapWindows:
         return inst
 
     @classmethod
-    def open(cls, path: Path) -> "_FinalizedMemmapWindows":
+    def open(cls, path: Path) -> _FinalizedMemmapWindows:
         """Re-open a finalized store for read-only indexing."""
         path = Path(path)
         meta = json.loads((path / cls._META_FILE).read_text())
@@ -375,7 +374,7 @@ class MemmapWindows:
     # ------------------------------------------------------------------
     # Finalize
     # ------------------------------------------------------------------
-    def finalize(self) -> "_FinalizedMemmapWindows":
+    def finalize(self) -> _FinalizedMemmapWindows:
         """Truncate backing files to the actual count and return a
         read-only Dataset-compatible object."""
         if self._n == 0:
@@ -488,12 +487,12 @@ class JitterDataset(torch.utils.data.Dataset):
 
     def __init__(
         self,
-        X: "torch.Tensor | None" = None,
-        y: "torch.Tensor | None" = None,
+        X: torch.Tensor | None = None,
+        y: torch.Tensor | None = None,
         sigma: float = 0.0,
         seed: int = 0,
         *,
-        inner: "torch.utils.data.Dataset | None" = None,
+        inner: torch.utils.data.Dataset | None = None,
     ):
         if inner is not None:
             # Disk-backed mode: do NOT store full tensors.

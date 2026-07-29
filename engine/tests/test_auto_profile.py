@@ -6,8 +6,7 @@ from datetime import UTC, datetime
 
 import pytest
 from scalpengine.cli import resolve_scalp_profile
-from scalpengine.config.scalp_tiers import (SCALP_LARGE, SCALP_MID,
-                                            SCALP_SMALL, profile_for_equity)
+from scalpengine.config.scalp_tiers import SCALP_LARGE, SCALP_MID, SCALP_SMALL, profile_for_equity
 
 from .test_bracket_wiring import make_scalp_engine
 

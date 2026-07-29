@@ -115,6 +115,14 @@ def test_slice_early_bars_drops_everything_after_0945():
 # 3. dataset join correctness on 3 synthetic stock-days.
 # --------------------------------------------------------------------------- #
 
+def _empty_daily_raw():
+    """Hermetic stand-in for data/daily_raw (absent in CI checkouts):
+    prev-day fields become NaN, which build_scanner_dataset tolerates."""
+    import pandas as pd
+    return pd.DataFrame([], columns=["close", "volume"],
+                        index=pd.MultiIndex.from_tuples([], names=["symbol", "ts"]))
+
+
 def test_dataset_join_three_days(tmp_path):
     specs = [("AAA", "2024-06-03", 3.0, 111.0),
              ("BBB", "2024-06-04", 4.0, 222.0),
@@ -145,7 +153,8 @@ def test_dataset_join_three_days(tmp_path):
         ikeys, names=["symbol", "ts"]))
 
     files = [corpus / f"{s}_{d}.parquet" for s, d, _b, _p in specs]
-    ds = build_scanner_dataset(viability, index, files, horizon_s=60)
+    ds = build_scanner_dataset(viability, index, files, horizon_s=60,
+                               daily_raw=_empty_daily_raw())
 
     assert len(ds) == 3
     assert set(ds["symbol"]) == {"AAA", "BBB", "CCC"}
@@ -175,7 +184,8 @@ def test_dataset_drops_day_without_label(tmp_path):
                          index=pd.MultiIndex.from_tuples(
                              [("AAA", ts)], names=["symbol", "ts"]))
     files = [corpus / "AAA_2024-06-03.parquet", corpus / "BBB_2024-06-04.parquet"]
-    ds = build_scanner_dataset(viability, index, files, horizon_s=60)
+    ds = build_scanner_dataset(viability, index, files, horizon_s=60,
+                               daily_raw=_empty_daily_raw())
     assert list(ds["symbol"]) == ["AAA"]
 
 

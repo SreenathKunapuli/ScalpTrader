@@ -1,6 +1,5 @@
 import numpy as np
 import pytest
-
 from scalp.simulator import LOBSimulator, SimConfig
 
 

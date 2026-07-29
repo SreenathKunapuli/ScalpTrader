@@ -39,10 +39,11 @@ from __future__ import annotations
 import json
 import logging
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -62,7 +63,6 @@ if str(_RESEARCH) not in sys.path:
 
 from scalp.corpus import second_bars  # noqa: E402
 from scanner.rank import (  # noqa: E402
-    FEATURES,
     build_scanner_features,
     slice_early_bars,
 )

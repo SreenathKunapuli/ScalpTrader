@@ -13,11 +13,9 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import pytest
-
-from scalp.bars_features import FeatureConfig, build_features
+from scalp.bars_features import build_features
 from scalp.triple_barrier import BarrierConfig, label_scalps
 from scalp.viability import FeeModel
-
 
 # ---------------------------------------------------------------------------
 # Helpers

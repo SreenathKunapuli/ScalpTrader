@@ -6,7 +6,6 @@ import numpy as np
 import pytest
 from scalp.sizing import size_scalp
 from scalp.viability import LOT_SIZE, FeeModel
-
 from scalpengine.config.scalp_tiers import SCALP_LARGE, SCALP_SMALL
 
 # generous tape so only the account-side caps bind unless a test says otherwise

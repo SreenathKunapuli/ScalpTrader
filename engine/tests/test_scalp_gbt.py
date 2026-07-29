@@ -8,7 +8,6 @@ import joblib
 import numpy as np
 import pandas as pd
 import pytest
-
 from scalpengine.signals.base import SignalOutput
 from scalpengine.signals.scalp_gbt import ScalpGbtSignal, build_features
 

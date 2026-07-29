@@ -5,8 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import pytest
-from scalp.viability import FeeModel, OracleConfig, frictionless_oracle, \
-    maker_oracle, taker_oracle
+from scalp.viability import FeeModel, OracleConfig, frictionless_oracle, maker_oracle, taker_oracle
 
 
 def mk_bars(mid: np.ndarray, spread: float = 0.01,

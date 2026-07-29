@@ -35,8 +35,15 @@ import torch
 from torch.utils.data import DataLoader, TensorDataset, WeightedRandomSampler
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from scalp.deep.dataset import JitterDataset, MemmapWindows, apply_scaler, \
-    build_windows, fit_scaler, save_scaler, subsample_negatives  # noqa: E402
+from scalp.deep.dataset import (
+    JitterDataset,
+    MemmapWindows,
+    apply_scaler,
+    build_windows,  # noqa: E402
+    fit_scaler,
+    save_scaler,
+    subsample_negatives,
+)
 from scalp.deep.model import ScalpTCN, pick_device  # noqa: E402
 from scalp.deep.train_loop import train  # noqa: E402
 from scalp.walkforward import TrainConfig, split_days  # noqa: E402
@@ -130,7 +137,7 @@ def _build_split_disk(
     files: list[Path], cfg: TrainConfig, window_s: int, scaler: dict,
     neg_frac: float | None, store_path: Path,
     quality_stems: set[str] | None = None,
-) -> tuple["MemmapWindows._FinalizedMemmapWindows", np.ndarray | None]:
+) -> tuple[MemmapWindows._FinalizedMemmapWindows, np.ndarray | None]:
     """Disk-backed variant of _load_split.
 
     Appends each day's (post-scale) windows to a MemmapWindows store under

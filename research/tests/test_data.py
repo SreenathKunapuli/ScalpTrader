@@ -1,7 +1,6 @@
 import dataclasses
 
 import numpy as np
-
 from scalp.data import clean_snapshots
 from scalp.simulator import LOBSimulator, SimConfig
 

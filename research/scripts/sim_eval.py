@@ -33,10 +33,19 @@ from scalp.bars_features import build_features  # noqa: E402
 from scalp.deep.model import TcnProbModel  # noqa: E402
 from scalp.sim import SimConfig, simulate  # noqa: E402
 from scalp.triple_barrier import label_scalps  # noqa: E402
-from scalp.walkforward import TrainConfig, barrier_arrays, build_dataset, \
-    fit_model, split_days  # noqa: E402
-from scripts.train_scalper import drop_columns, limit_by_quality, \
-    parse_drop_features, quality_weight_array  # noqa: E402
+from scalp.walkforward import (
+    TrainConfig,
+    barrier_arrays,
+    build_dataset,
+    fit_model,  # noqa: E402
+    split_days,
+)
+from scripts.train_scalper import (
+    drop_columns,
+    limit_by_quality,
+    parse_drop_features,  # noqa: E402
+    quality_weight_array,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 MANIFEST = ROOT / "data" / "corpus" / "manifest.csv"

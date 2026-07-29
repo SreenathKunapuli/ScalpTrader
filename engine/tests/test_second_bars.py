@@ -13,7 +13,6 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
-
 from scalpengine.data.second_bars import SecondBarBuilder
 
 _RESEARCH = Path(__file__).resolve().parents[2] / "research"

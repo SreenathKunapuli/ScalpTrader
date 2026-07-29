@@ -4,15 +4,19 @@ fit_model kwarg forwarding, --drop-features column logic, and the
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
-from pathlib import Path
-
 from scalp.walkforward import TrainConfig, fit_model, split_days, split_val_days
 from scripts.sim_eval import day_entries
-from scripts.train_scalper import drop_columns, limit_by_quality, \
-    parse_drop_features, quality_weight_array
+from scripts.train_scalper import (
+    drop_columns,
+    limit_by_quality,
+    parse_drop_features,
+    quality_weight_array,
+)
 
 
 def _xy(n: int = 200, seed: int = 0) -> tuple[pd.DataFrame, pd.Series]:

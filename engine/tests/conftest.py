@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
-
 import dataclasses
+from datetime import UTC, datetime
 
 import pytest
 from scalpengine.config.tiers import TIERS, Tier

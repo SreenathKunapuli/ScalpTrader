@@ -28,7 +28,6 @@ from alpaca.data.timeframe import TimeFrame  # noqa: E402
 from alpaca.trading.client import TradingClient  # noqa: E402
 from alpaca.trading.enums import AssetClass, AssetStatus  # noqa: E402
 from alpaca.trading.requests import GetAssetsRequest  # noqa: E402
-
 from scanner.data import fetch_daily  # noqa: E402
 
 FUND_RE = re.compile(r"ETF|ETN|iShares|SPDR|ProShares|Direxion|VanEck|Invesco|"

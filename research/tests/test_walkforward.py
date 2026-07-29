@@ -5,8 +5,14 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import pytest
-from scalp.walkforward import TrainConfig, _non_overlapping, build_dataset, \
-    evaluate, fit_model, split_days
+from scalp.walkforward import (
+    TrainConfig,
+    _non_overlapping,
+    build_dataset,
+    evaluate,
+    fit_model,
+    split_days,
+)
 
 CFG = TrainConfig(target_ps=0.05, stop_ps=0.04, timeout_s=20,
                   max_rows_per_day=500, prob_threshold_grid=(0.4, 0.6))

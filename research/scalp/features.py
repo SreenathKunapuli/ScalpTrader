@@ -168,7 +168,7 @@ class Normalizer:
     mean: np.ndarray | None = None
     std: np.ndarray | None = None
 
-    def fit(self, x: np.ndarray) -> "Normalizer":
+    def fit(self, x: np.ndarray) -> Normalizer:
         self.mean = x.mean(axis=0)
         self.std = x.std(axis=0)
         self.std = np.where(self.std < EPS, 1.0, self.std)

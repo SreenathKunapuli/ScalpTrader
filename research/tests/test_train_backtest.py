@@ -1,9 +1,7 @@
 import numpy as np
-import pytest
-
 from scalp.backtest import BacktestConfig, run_backtest, signal_from_labels, vpin_toxicity
 from scalp.labels import INVALID, LabelConfig, make_labels
-from scalp.train import SplitIndices, WindowDataset, temporal_split
+from scalp.train import WindowDataset, temporal_split
 
 
 def test_temporal_split_embargo():

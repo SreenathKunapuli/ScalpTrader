@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from scalpengine.data.alpaca_stream import SUBSCRIPTION_LIMIT, plan_subscriptions
+from scalpengine.data.alpaca_stream import plan_subscriptions
 
 
 def test_plan_20_runners_2_context() -> None:

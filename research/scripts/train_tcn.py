@@ -265,6 +265,12 @@ def main() -> None:
                         "<out>/wcache/ so RAM usage is O(window) not "
                         "O(dataset); wcache is deleted after a successful "
                         "training run.")
+    p.add_argument("--window-cache-dir", default=None,
+                   help="override the disk window-store location (default "
+                        "<out>/wcache). On Kaggle this MUST point at scratch "
+                        "(/kaggle/tmp): the run dir lives under "
+                        "/kaggle/working whose ~20GB output quota a full "
+                        "window store exceeds — observed kill 2026-07-27.")
     p.add_argument("--out", default="runs/tcn")
     args = p.parse_args()
 
@@ -342,7 +348,8 @@ def main() -> None:
     if args.quality_oversample != 1:
         quality_stems = {f.stem for f in files[:QUALITY_TOP_N]}
 
-    wcache_dir = out / "wcache"
+    wcache_dir = (Path(args.window_cache_dir) if args.window_cache_dir
+                  else out / "wcache")
     use_disk = (args.window_store == "disk")
 
     if use_disk:

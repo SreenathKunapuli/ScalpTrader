@@ -67,6 +67,15 @@ def main() -> None:
         "id": f"KAGGLE_USERNAME/{args.slug}",
         "licenses": [{"name": "CC0-1.0"}],
     }, indent=2))
+
+    # Sync the kernel entrypoint into the push dir too. v10 (2026-07-29) ran a
+    # stale July-20 copy because only the dataset side was rebuilt — the v9
+    # disk-quota fix never shipped and the run died identically.
+    kdir = ROOT / "build/kaggle_kernel"
+    if kdir.exists():
+        shutil.copy2(ROOT / "research/scripts/kaggle_kernel.py",
+                     kdir / "kaggle_kernel.py")
+        print(f"kernel script synced -> {kdir}")
     print(f"ready -> {OUT}  (fill KAGGLE_USERNAME in dataset-metadata.json)")
 
 

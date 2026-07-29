@@ -70,10 +70,14 @@ elif not (WORK / "data/corpus").exists():
     (WORK / "data/corpus").symlink_to(corpus_src)
 
 def _disk(label: str) -> None:
+    Path("/kaggle/tmp").mkdir(parents=True, exist_ok=True)
     for mnt in ("/kaggle/working", "/kaggle/tmp"):
-        u = shutil.disk_usage(mnt)
-        print(f"[disk {label}] {mnt}: free {u.free / 1e9:.1f} GB "
-              f"of {u.total / 1e9:.1f} GB", flush=True)
+        try:
+            u = shutil.disk_usage(mnt)
+            print(f"[disk {label}] {mnt}: free {u.free / 1e9:.1f} GB "
+                  f"of {u.total / 1e9:.1f} GB", flush=True)
+        except OSError as exc:  # diagnostics must never kill the run
+            print(f"[disk {label}] {mnt}: unavailable ({exc})", flush=True)
 
 
 worst = 0

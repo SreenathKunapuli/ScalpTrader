@@ -461,7 +461,9 @@ Repro: /tmp/iex_parity.py → /tmp/iex_parity_results.json.
 
 User asked to try 0.55 ("no trades happening" on free IEX). Same sim gate
 as the 0.6/0.7 runs (26f, 361 OOS days, realistic fills):
-thr 0.7 taker +$40,996 / maker +$39,652; 0.6 −$46,771 / +$37,589;
+thr 0.7 taker +$40,996 / maker +$49,332 (full 361-day scope per
+runs/sim_eval/20260719_120559; corrected 2026-07-30 — this line previously
+quoted the matched-122-day maker figure); 0.6 −$46,771 / +$37,589;
 0.55 −$131,443 / **+$842**; 0.50 −$274,930 / −$72,186
 (runs/sim_eval/20260721_132349, _133707). Each threshold step down ~2×
 the attempts and strictly worse economics; maker edge is gone by 0.55.
